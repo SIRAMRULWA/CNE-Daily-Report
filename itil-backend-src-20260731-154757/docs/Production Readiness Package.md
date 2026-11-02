@@ -119,10 +119,9 @@ Notes:
 - The frontend must use `http://itil-backend-api:8000` as its internal backend
   origin on `itil-net`; it must not use the public frontend hostname.
 
-The current backend repository Compose file publishes TCP `8000` on the host and
-does not yet declare `itil-net`. Before production deployment, the application
-team must update or override that Compose configuration so the backend joins
-`itil-net` and TCP `8000` is not externally exposed. Infrastructure should
+The backend `docker-compose.yml` joins the external `itil-net` network
+(create it once with `podman network create itil-net`) and publishes TCP `8000`
+and PostgreSQL (host port `5433`) on `127.0.0.1` only. Infrastructure should
 verify the resulting host listeners and firewall state before go-live.
 
 Please complete the following values and return them to the application team:

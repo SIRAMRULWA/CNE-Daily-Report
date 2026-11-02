@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   postgres:
     image: postgres:16-alpine
@@ -10,11 +8,13 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-itil_user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     ports:
-      - "5433:5432"  # Exposes Postgres to the host for external Grafana/Power BI
+      # Host-local only by default. Set POSTGRES_BIND_ADDRESS only if an approved
+      # firewall rule allows Grafana/Power BI to reach PostgreSQL directly.
+      - "${POSTGRES_BIND_ADDRESS:-127.0.0.1}:${POSTGRES_HOST_PORT:-5433}:5432"
     volumes:
       - /opt/itil-report-stack/shared/pgdata:/var/lib/postgresql/data:Z
     networks:
-      - itil-shared-net
+      - itil-net
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
@@ -43,14 +43,16 @@ services:
       ENVIRONMENT: ${ENVIRONMENT:-production}
       REQUIRE_DB_ON_STARTUP: ${REQUIRE_DB_ON_STARTUP:-true}
     ports:
-      - "${API_PORT:-8000}:8000"
+      # Host-local only: the frontend reaches the API over the shared network
+      # at http://itil-backend-api:8000. TCP 8000 must not be exposed externally.
+      - "127.0.0.1:${API_PORT:-8000}:8000"
     volumes:
       - /opt/itil-report-stack/shared/data:/app/data:Z
       - /opt/itil-report-stack/shared/output:/app/output:Z
       - /opt/itil-report-stack/shared/logs/dbt:/app/dbt/logs:Z
       - /opt/itil-report-stack/shared/dbt/target:/app/dbt/target:Z
     networks:
-      - itil-shared-net
+      - itil-net
     depends_on:
       postgres:
         condition: service_healthy
@@ -61,5 +63,9 @@ services:
         max-file: "${LOG_MAX_FILES:-5}"
 
 networks:
-  itil-shared-net:
+  itil-net:
+    # Shared rootless Podman network, created once per host:
+    #   podman network create itil-net
+    # QA hosts that still use the legacy name can set ITIL_NETWORK=itil-shared-net.
+    name: ${ITIL_NETWORK:-itil-net}
     external: true
