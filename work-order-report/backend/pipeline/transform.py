@@ -1,270 +1,166 @@
 """
 pipeline/transform.py
 =====================
-Business logic transformation engine.
+Work Order business-rule transformation.
 
-This module applies the shared daily operations report logic:
-  - report_group from Assignee Group patterns
-  - report_category from Service Cat Tier 1, with dashboard-compatible fallback
-    from RootRequestID, Summary, and Notes when Service Cat Tier 1 is blank
-  - report inclusion from open statuses, named-assignee exclusions, and
-    Work Order/PBI rules (Security work orders remain in scope)
-  - category-specific SLA bands
+Every Work Order passes through this one transform, so the report, the
+current-records view and the custom Helix report all agree. Stages:
+
+  1. division        support group -> division (database mappings)
+  2. report_category Work Order Type, else Categorization Tier 1, else Unclassified
+  3. sla_status      target-date rule (see _sla_status)
+  4. hours_open      submit date -> now (open) or -> completed date (closed)
+  5. days_to_target  whole days until the target date; negative = overdue
+  6. is_open         status is one of the open statuses
+  7. is_excluded     outside the report scope (see is_report_eligible)
 """
 
 import logging
+import math
 from datetime import datetime, timedelta
 from typing import List, Optional
 
 from config.mappings import (
-    ASSIGN_TIME_BREACH_SECONDS,
-    ASSIGN_TIME_NEARING_SECONDS,
-    CATEGORY_MAP,
-    CHANGE_NEARING_WINDOW_SECONDS,
-    CHANGE_SCHEDULE_GRACE_SECONDS,
     CLOSED_STATUSES,
-    EXCLUDED_ASSIGNEES,
-    EXCLUDED_OPERATIONAL_CATEGORIES,
-    EXCLUDED_REQUEST_PREFIXES,
-    EXCLUDED_WORK_ORDER_GROUP_PATTERNS,
+    GRACE_MINUTES,
+    NEARING_WINDOW_HOURS,
     OPEN_STATUSES,
-    REQUEST_PREFIX_TASK_TYPE,
+    UNCLASSIFIED_CATEGORY,
 )
 from pipeline.division_groups import load_group_patterns
-from pipeline.models import ChangeRecord
+from pipeline.models import WorkOrderRecord
 
 logger = logging.getLogger(__name__)
 
+UNKNOWN_DIVISION = "Unknown"
 
-def _classify_group(
-    assignee_group: Optional[str],
+
+def _status(rec: WorkOrderRecord) -> str:
+    return (rec.status or "").strip()
+
+
+def classify_division(
+    support_group: Optional[str],
     group_patterns: list[tuple[str, str]],
 ) -> Optional[str]:
-    if not assignee_group:
+    """Match a support group to a division; longest (most specific) pattern wins."""
+    if not support_group:
         return None
-    ag = assignee_group.strip()
-    for pattern, label in group_patterns:
-        if pattern.lower() in ag.lower():
-            return label
-    logger.debug("No group match for: %r", ag)
-    return "Unknown"
+    group = support_group.strip().lower()
+    for pattern, division in sorted(group_patterns, key=lambda item: -len(item[0])):
+        if pattern.strip().lower() in group:
+            return division
+    logger.debug("No division match for support group %r", support_group)
+    return UNKNOWN_DIVISION
 
 
-def _op_cat_key(value: Optional[str]) -> str:
-    return (value or "").strip().upper()
+def classify_category(rec: WorkOrderRecord) -> str:
+    for value in (rec.work_order_type, rec.category_tier1):
+        text = (value or "").strip()
+        if text:
+            return text
+    return UNCLASSIFIED_CATEGORY
 
 
-def _text_key(value: Optional[str]) -> str:
-    return (value or "").strip().upper()
+def due_at(rec: WorkOrderRecord) -> Optional[datetime]:
+    """The moment a Work Order becomes late (target date plus any grace)."""
+    if rec.target_date is None:
+        return None
+    return rec.target_date + timedelta(minutes=GRACE_MINUTES)
 
 
-def _contains_security_indicator(rec: ChangeRecord) -> bool:
-    summary = _text_key(rec.summary)
-    notes = _text_key(rec.notes)
+def sla_status(rec: WorkOrderRecord, now: datetime) -> str:
+    """Return the SLA status for one Work Order.
 
-    return (
-        summary.startswith("ARM:")
-        or "PASSWORD" in summary
-        or "ACCESS" in summary
-        or "ARM:" in notes
-        or "PASSWORD" in notes
-        or "ACCESS" in notes
-    )
+    Open Work Orders:
+        BREACHED        now > target
+        NEARING_SLA     target - nearing window < now <= target
+        WITHIN_SLA      now <= target - nearing window
+        NO_TARGET_DATE  no target date
+    Completed Work Orders:
+        MET_TARGET      completed on or before target
+        MISSED_TARGET   completed after target
+        NO_TARGET_DATE  no target date
+    Anything else (Cancelled, Rejected, Draft, unknown) is OUT_OF_SCOPE.
+    """
+    status = _status(rec)
+    due = due_at(rec)
 
+    if status in OPEN_STATUSES:
+        if due is None:
+            return "NO_TARGET_DATE"
+        if now > due:
+            return "BREACHED"
+        if now > due - timedelta(hours=NEARING_WINDOW_HOURS):
+            return "NEARING_SLA"
+        return "WITHIN_SLA"
 
-def _infer_incident_task_type(rec: ChangeRecord) -> str:
-    summary = _text_key(rec.summary)
-    notes = _text_key(rec.notes)
-
-    if _contains_security_indicator(rec):
-        return "SECURITY"
-
-    if summary.startswith("ALARM") or "ALARM" in notes:
-        return "ALARM"
-
-    return "FAULTS"
-
-
-def derive_operational_category(rec: ChangeRecord) -> str:
-    """Return the dashboard-compatible operational category for one record."""
-    op_cat = _op_cat_key(rec.op_cat_tier1)
-    if op_cat:
-        if op_cat == "FAILURE":
-            return "ALARM"
-        return op_cat
-
-    request_id = (rec.request_id or "").upper()
-    if request_id.startswith("INC"):
-        return _infer_incident_task_type(rec)
-
-    for prefix, task_type in REQUEST_PREFIX_TASK_TYPE.items():
-        if request_id.startswith(prefix):
-            return task_type
-
-    return "ALARM"
-
-
-def _classify_category(rec: ChangeRecord) -> Optional[str]:
-    task_type = derive_operational_category(rec)
-    cat = CATEGORY_MAP.get(task_type)
-    if cat:
-        return cat
-
-    logger.debug(
-        "No category for %s (op_cat=%r task_type=%r)",
-        rec.request_id,
-        rec.op_cat_tier1,
-        task_type,
-    )
-    return None
-
-
-def _sla_status(rec: ChangeRecord, now: datetime) -> str:
-    status = (rec.status or "").strip()
     if status in CLOSED_STATUSES:
-        return "CLOSED"
-    if status not in OPEN_STATUSES:
-        return "OUT_OF_SCOPE"
-
-    if rec.report_category == "CHANGE":
-        if not rec.scheduled_end:
-            return "NO_SCHEDULE"
-        due = rec.scheduled_end + timedelta(seconds=CHANGE_SCHEDULE_GRACE_SECONDS)
-        if now > due:
-            return "BREACHED"
-        if now > due - timedelta(seconds=CHANGE_NEARING_WINDOW_SECONDS):
-            return "NEARING_SLA"
-        return "WITHIN_SLA"
-
-    if rec.report_category in ("INCIDENT", "ACCESS", "EVENT"):
-        if not rec.assign_time:
-            return "NO_ASSIGN_TIME"
-        near_at = rec.assign_time + timedelta(seconds=ASSIGN_TIME_NEARING_SECONDS)
-        due = rec.assign_time + timedelta(seconds=ASSIGN_TIME_BREACH_SECONDS)
-        if now > due:
-            return "BREACHED"
-        if now >= near_at:
-            return "NEARING_SLA"
-        return "WITHIN_SLA"
+        if due is None:
+            return "NO_TARGET_DATE"
+        completed = rec.completed_date
+        if completed is None:
+            return "MISSED_TARGET" if now > due else "MET_TARGET"
+        return "MET_TARGET" if completed <= due else "MISSED_TARGET"
 
     return "OUT_OF_SCOPE"
 
 
-def _hours_open(rec: ChangeRecord, now: datetime) -> Optional[float]:
-    if not rec.assign_time:
+def hours_open(rec: WorkOrderRecord, now: datetime) -> Optional[float]:
+    if rec.submit_date is None:
         return None
-    status = (rec.status or "").strip()
-    end = rec.closed_time if status in CLOSED_STATUSES and rec.closed_time else now
-    return (end - rec.assign_time).total_seconds() / 3600.0
+    end = now
+    if _status(rec) in CLOSED_STATUSES and rec.completed_date is not None:
+        end = rec.completed_date
+    return max((end - rec.submit_date).total_seconds(), 0) / 3600.0
 
 
-def _is_report_eligible(rec: ChangeRecord) -> bool:
-    if rec.report_group in (None, "Unknown"):
+def days_to_target(rec: WorkOrderRecord, now: datetime) -> Optional[int]:
+    """Whole days until the target date; negative when overdue (rounded away from 0)."""
+    due = due_at(rec)
+    if due is None:
+        return None
+    if _status(rec) in CLOSED_STATUSES and rec.completed_date is not None:
+        reference = rec.completed_date
+    else:
+        reference = now
+    days = (due - reference).total_seconds() / 86_400
+    return math.floor(days) if days >= 0 else -math.ceil(-days)
+
+
+def is_report_eligible(rec: WorkOrderRecord) -> bool:
+    """In scope = mapped division, and an open or completed status."""
+    if rec.division in (None, UNKNOWN_DIVISION):
         return False
-    if rec.report_category not in ("INCIDENT", "CHANGE", "ACCESS", "EVENT"):
-        return False
-
-    if _text_key(rec.assignee) in EXCLUDED_ASSIGNEES:
-        return False
-
-    status = (rec.status or "").strip()
-    if status not in OPEN_STATUSES:
-        return False
-
-    op_cat = _op_cat_key(rec.op_cat_tier1)
-    request_id = (rec.request_id or "").upper()
-    assignee_group = _text_key(rec.assignee_group)
-    is_excluded_work_order_group = (
-        request_id.startswith("WO")
-        and any(
-            pattern.upper() in assignee_group
-            for pattern in EXCLUDED_WORK_ORDER_GROUP_PATTERNS
-        )
-    )
-    if is_excluded_work_order_group:
-        return False
-
-    is_security_work_order = (
-        request_id.startswith("WO")
-        and rec.report_category == "ACCESS"
-    )
-    if op_cat in EXCLUDED_OPERATIONAL_CATEGORIES and not is_security_work_order:
-        return False
-
-    if (
-        not is_security_work_order
-        and any(request_id.startswith(prefix) for prefix in EXCLUDED_REQUEST_PREFIXES)
-    ):
-        return False
-
-    return True
+    status = _status(rec)
+    return status in OPEN_STATUSES or status in CLOSED_STATUSES
 
 
 def transform_records(
-    records: List[ChangeRecord],
+    records: List[WorkOrderRecord],
     as_of: Optional[datetime] = None,
-) -> List[ChangeRecord]:
-    """
-    Run all transformation stages in a single pass.
-    Mutates records in-place and returns the same list.
-    """
+    group_patterns: Optional[list[tuple[str, str]]] = None,
+) -> List[WorkOrderRecord]:
+    """Apply every stage in one pass. Mutates records in place and returns them."""
     now = as_of or datetime.now()
-    group_patterns = load_group_patterns()
-
-    stats = {
-        "unknown_group": 0,
-        "unknown_cat": 0,
-        "breached": 0,
-        "nearing": 0,
-        "no_schedule": 0,
-        "no_assign_time": 0,
-        "excl_change": 0,
-        "excl_incident": 0,
-    }
+    patterns = load_group_patterns() if group_patterns is None else group_patterns
+    counts: dict[str, int] = {}
 
     for rec in records:
-        rec.report_group = _classify_group(rec.assignee_group, group_patterns)
-        rec.report_category = _classify_category(rec)
-        rec.sla_status = _sla_status(rec, now)
-        rec.hours_open = _hours_open(rec, now)
+        rec.division = classify_division(rec.support_group, patterns)
+        rec.report_category = classify_category(rec)
+        rec.sla_status = sla_status(rec, now)
+        rec.hours_open = hours_open(rec, now)
+        rec.days_to_target = days_to_target(rec, now)
+        rec.is_open = _status(rec) in OPEN_STATUSES
+        rec.is_excluded = not is_report_eligible(rec)
 
-        eligible = _is_report_eligible(rec)
-        rec.exclude_change = False
-        rec.exclude_incident = False
-        if not eligible:
-            if rec.report_category == "CHANGE":
-                rec.exclude_change = True
-            else:
-                rec.exclude_incident = True
-
-        if rec.report_group in (None, "Unknown"):
-            stats["unknown_group"] += 1
-        if rec.report_category is None:
-            stats["unknown_cat"] += 1
-        if rec.sla_status == "BREACHED":
-            stats["breached"] += 1
-        if rec.sla_status == "NEARING_SLA":
-            stats["nearing"] += 1
-        if rec.sla_status == "NO_SCHEDULE":
-            stats["no_schedule"] += 1
-        if rec.sla_status == "NO_ASSIGN_TIME":
-            stats["no_assign_time"] += 1
-        if rec.exclude_change:
-            stats["excl_change"] += 1
-        if rec.exclude_incident:
-            stats["excl_incident"] += 1
+        key = "EXCLUDED" if rec.is_excluded else rec.sla_status
+        counts[key] = counts.get(key, 0) + 1
 
     logger.info(
-        "Transform complete | %d records | breached=%d nearing=%d no_sched=%d no_assign=%d "
-        "excl_change=%d excl_incident=%d unknown_grp=%d unknown_cat=%d",
+        "Transform complete | %d Work Orders | %s",
         len(records),
-        stats["breached"],
-        stats["nearing"],
-        stats["no_schedule"],
-        stats["no_assign_time"],
-        stats["excl_change"],
-        stats["excl_incident"],
-        stats["unknown_group"],
-        stats["unknown_cat"],
+        " ".join(f"{key.lower()}={value}" for key, value in sorted(counts.items())),
     )
     return records

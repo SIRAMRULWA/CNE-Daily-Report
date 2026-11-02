@@ -26,7 +26,7 @@ class ApiContractTests(unittest.TestCase):
 
     def test_canonical_v1_operation_count(self):
         v1 = [item for item in self.operations if item[0].startswith("/api/v1/")]
-        self.assertEqual(44, len(v1))
+        self.assertEqual(28, len(v1))
 
     def test_v1_operations_document_standard_errors(self):
         for path, method, operation in self.operations:
@@ -52,13 +52,24 @@ class ApiContractTests(unittest.TestCase):
 
     def test_resource_creation_status_codes(self):
         self.assertIn("201", self.schema["paths"]["/api/v1/auth/sessions"]["post"]["responses"])
-        self.assertIn("201", self.schema["paths"]["/api/v1/report-deliveries"]["post"]["responses"])
-        self.assertIn("201", self.schema["paths"]["/api/v1/automation/task-reminder-executions"]["post"]["responses"])
 
-    def test_automation_trigger_uses_api_key_security(self):
-        operation = self.schema["paths"]["/api/v1/automation/task-reminder-executions"]["post"]
-        security_names = {name for requirement in operation["security"] for name in requirement}
-        self.assertIn("APIKeyHeader", security_names)
+    def test_phase_two_and_maintenance_endpoints_are_absent(self):
+        paths = set(self.schema["paths"])
+        for path in (
+            "/api/v1/report-subscriptions",
+            "/api/v1/report-deliveries",
+            "/api/v1/task-reminder-subscriptions",
+            "/api/v1/task-reminder-executions",
+            "/api/v1/automation/task-reminder-executions",
+            "/api/v1/maintenance/data-cleanup-jobs",
+        ):
+            with self.subTest(path=path):
+                self.assertNotIn(path, paths)
+
+    def test_report_sla_filter_documents_work_order_values(self):
+        operation = self.schema["paths"]["/api/v1/operational-records"]["get"]
+        sla = next(p for p in operation["parameters"] if p["name"] == "sla")
+        self.assertIn("NO_TARGET_DATE", sla["description"])
 
 
 if __name__ == "__main__":

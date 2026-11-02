@@ -1,20 +1,20 @@
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: itil-postgres
+    container_name: wo-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-itil_reports}
-      POSTGRES_USER: ${POSTGRES_USER:-itil_user}
+      POSTGRES_DB: ${POSTGRES_DB:-wo_reports}
+      POSTGRES_USER: ${POSTGRES_USER:-wo_user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     ports:
       # Host-local only by default. Set POSTGRES_BIND_ADDRESS only if an approved
       # firewall rule allows Grafana/Power BI to reach PostgreSQL directly.
-      - "${POSTGRES_BIND_ADDRESS:-127.0.0.1}:${POSTGRES_HOST_PORT:-5433}:5432"
+      - "${POSTGRES_BIND_ADDRESS:-127.0.0.1}:${POSTGRES_HOST_PORT:-5434}:5432"
     volumes:
-      - /opt/itil-report-stack/shared/pgdata:/var/lib/postgresql/data:Z
+      - /opt/wo-report-stack/shared/pgdata:/var/lib/postgresql/data:Z
     networks:
-      - itil-net
+      - wo-net
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
@@ -28,31 +28,31 @@ services:
 
   app:
     build: .
-    image: ${APP_IMAGE:-itil-group-reports:latest}
-    container_name: itil-backend-api
+    image: ${APP_IMAGE:-work-order-report:latest}
+    container_name: wo-backend-api
     restart: unless-stopped
     env_file:
-      - /opt/itil-report-stack/shared/.env
+      - /opt/wo-report-stack/shared/.env
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-itil_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-itil_reports}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-wo_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-wo_reports}
       DB_HOST: postgres
       DB_PORT: 5432
-      DB_NAME: ${POSTGRES_DB:-itil_reports}
-      DB_USER: ${POSTGRES_USER:-itil_user}
+      DB_NAME: ${POSTGRES_DB:-wo_reports}
+      DB_USER: ${POSTGRES_USER:-wo_user}
       DB_PASSWORD: ${POSTGRES_PASSWORD}
       ENVIRONMENT: ${ENVIRONMENT:-production}
       REQUIRE_DB_ON_STARTUP: ${REQUIRE_DB_ON_STARTUP:-true}
     ports:
       # Host-local only: the frontend reaches the API over the shared network
-      # at http://itil-backend-api:8000. TCP 8000 must not be exposed externally.
-      - "127.0.0.1:${API_PORT:-8000}:8000"
+      # at http://wo-backend-api:8000. TCP 8000 must not be exposed externally.
+      - "127.0.0.1:${API_HOST_PORT:-8010}:8000"
     volumes:
-      - /opt/itil-report-stack/shared/data:/app/data:Z
-      - /opt/itil-report-stack/shared/output:/app/output:Z
-      - /opt/itil-report-stack/shared/logs/dbt:/app/dbt/logs:Z
-      - /opt/itil-report-stack/shared/dbt/target:/app/dbt/target:Z
+      - /opt/wo-report-stack/shared/data:/app/data:Z
+      - /opt/wo-report-stack/shared/output:/app/output:Z
+      - /opt/wo-report-stack/shared/logs/dbt:/app/dbt/logs:Z
+      - /opt/wo-report-stack/shared/dbt/target:/app/dbt/target:Z
     networks:
-      - itil-net
+      - wo-net
     depends_on:
       postgres:
         condition: service_healthy
@@ -63,9 +63,8 @@ services:
         max-file: "${LOG_MAX_FILES:-5}"
 
 networks:
-  itil-net:
+  wo-net:
     # Shared rootless Podman network, created once per host:
-    #   podman network create itil-net
-    # QA hosts that still use the legacy name can set ITIL_NETWORK=itil-shared-net.
-    name: ${ITIL_NETWORK:-itil-net}
+    #   podman network create wo-net
+    name: ${WO_NETWORK:-wo-net}
     external: true

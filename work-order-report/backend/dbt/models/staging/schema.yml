@@ -1,141 +1,79 @@
 version: 2
 
 models:
-  - name: stg_changes
+  - name: stg_work_orders
     description: >
-      Deduplicated and normalised view over staging.raw_changes.
-      One row per (request_id, task_id). Source for all downstream marts.
+      Normalised view over staging.raw_work_orders. One row per Work Order.
+      Source for all Work Order marts.
     columns:
-      - name: request_id
-        description: Helix RootRequestID (CRQ.../INC...)
+      - name: work_order_id
+        description: Helix Work Order ID (WO...)
         tests:
           - not_null
-      - name: task_id
-        description: Helix TaskID (TAS...)
-        tests:
-          - not_null
-      - name: report_category
-        description: Derived report column — INCIDENT / CHANGE / ACCESS / EVENT
-        tests:
-          - accepted_values:
-              arguments:
-                values: ['INCIDENT', 'CHANGE', 'ACCESS', 'EVENT']
-              config:
-                severity: warn
+          - unique
       - name: sla_status
-        description: SLA band - WITHIN_SLA / NEARING_SLA / BREACHED / NO_SCHEDULE / NO_ASSIGN_TIME / CLOSED / OUT_OF_SCOPE
+        description: >
+          Target-date SLA status. Open: WITHIN_SLA / NEARING_SLA / BREACHED /
+          NO_TARGET_DATE. Completed: MET_TARGET / MISSED_TARGET / NO_TARGET_DATE.
+          Anything else: OUT_OF_SCOPE.
         tests:
           - accepted_values:
               arguments:
-                values: ['WITHIN_SLA', 'NEARING_SLA', 'BREACHED', 'NO_SCHEDULE', 'NO_ASSIGN_TIME', 'CLOSED', 'OUT_OF_SCOPE']
+                values: ['WITHIN_SLA', 'NEARING_SLA', 'BREACHED', 'NO_TARGET_DATE', 'MET_TARGET', 'MISSED_TARGET', 'OUT_OF_SCOPE']
               config:
                 severity: warn
 
-  - name: daily_report_summary
+  - name: wo_report_records
     description: >
-      Pre-aggregated daily operations report matrix for every configured division
-      and assignee group with eligible active records.
-      Grain: one row per (report_date, report_group, assignee_group, sla_band).
-      The model is incremental so previous report_date snapshots are preserved
-      for historical day/week reporting, while each snapshot only consumes
-      records loaded on that same WORKSPACE_TIMEZONE date.
-      Powers the /api/v1/daily-reports endpoint and Power BI direct queries.
+      Daily snapshot of open, in-scope Work Orders. Grain: one row per
+      (report_date, work_order_id). Each snapshot only uses rows loaded on that
+      WORKSPACE_TIMEZONE date. Powers /api/v1/daily-reports/records.
     columns:
       - name: report_date
-        tests:
-          - not_null
-      - name: report_group
-        tests:
-          - not_null
-      - name: assignee_group
-        tests:
-          - not_null
-      - name: sla_band
-        tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: ['Total Open Calls', 'Calls Nearing SLA', 'Breached Calls']
-      - name: total_count
-        tests:
-          - not_null
-
-  - name: daily_report_records
-    description: >
-      Record-level daily operations report snapshot for every eligible active
-      record. Grain: one row per (report_date, request_id, task_id).
-      This model lets report_date drive drill-through records, groups, KPIs,
-      and matrix rows from the same historical date window without mixing
-      records loaded on different dates.
-    columns:
-      - name: report_date
-        tests:
-          - not_null
-      - name: request_id
-        tests:
-          - not_null
-      - name: task_id
-        tests:
-          - not_null
-      - name: report_group
-        tests:
-          - not_null
-      - name: assignee_group
-        tests:
-          - not_null
-      - name: report_category
-        tests:
-          - accepted_values:
-              arguments:
-                values: ['INCIDENT', 'CHANGE', 'ACCESS', 'EVENT']
+        tests: [not_null]
+      - name: work_order_id
+        tests: [not_null]
+      - name: division
+        tests: [not_null]
+      - name: support_group
+        tests: [not_null]
       - name: sla_status
         tests:
           - accepted_values:
               arguments:
-                values: ['WITHIN_SLA', 'NEARING_SLA', 'BREACHED', 'NO_SCHEDULE', 'NO_ASSIGN_TIME']
+                values: ['WITHIN_SLA', 'NEARING_SLA', 'BREACHED', 'NO_TARGET_DATE']
 
-  - name: daily_report_success_closures
+  - name: wo_report_summary
     description: >
-      Per-group count of records whose Actual End Date was the prior local day
-      and whose Status Reason was Success. Captured by the next morning run and
-      kept separate from active SLA counts.
+      Report grid: open Work Orders by SLA status per support group.
+      Grain: one row per (report_date, division, support_group).
+      Powers /api/v1/daily-reports.
     columns:
       - name: report_date
-        tests:
-          - not_null
-      - name: closure_date
-        tests:
-          - not_null
+        tests: [not_null]
+      - name: division
+        tests: [not_null]
+      - name: support_group
+        tests: [not_null]
+      - name: total_open
+        tests: [not_null]
+
+  - name: wo_completed
+    description: >
+      Work Orders completed in the previous scheduled 24-hour window, marked
+      MET_TARGET, MISSED_TARGET or NO_TARGET_DATE.
+      Grain: one row per (report_date, work_order_id).
+    columns:
+      - name: report_date
+        tests: [not_null]
+      - name: work_order_id
+        tests: [not_null]
       - name: window_start
-        tests:
-          - not_null
+        tests: [not_null]
       - name: window_end
+        tests: [not_null]
+      - name: sla_status
         tests:
-          - not_null
-      - name: report_group
-        tests:
-          - not_null
-      - name: assignee_group
-        tests:
-          - not_null
-      - name: total_count
-        tests:
-          - not_null
-
-  - name: daily_report_closed_changes
-    description: >
-      Attachment-only record snapshot of changes closed in the prior scheduled
-      24-hour window, including every status reason and outcome.
-    columns:
-      - name: report_date
-        tests:
-          - not_null
-      - name: request_id
-        tests:
-          - not_null
-      - name: task_id
-        tests:
-          - not_null
-      - name: report_group
-        tests:
-          - not_null
+          - accepted_values:
+              arguments:
+                values: ['MET_TARGET', 'MISSED_TARGET', 'NO_TARGET_DATE']

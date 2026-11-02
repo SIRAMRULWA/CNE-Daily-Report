@@ -6,8 +6,8 @@ Excel file discovery, extraction, and archiving.
 Responsibilities:
   - Discover pending .xlsx / .xls files in the configured drop folder.
   - Open workbooks in read-only mode via openpyxl.
-  - Detect the real header row by locating 'Request ID'.
-  - Map source column names to canonical ChangeRecord fields.
+  - Detect the real header row by locating the Work Order ID column.
+  - Map source column names to canonical WorkOrderRecord fields.
   - Yield records in batches of BATCH_SIZE.
   - Archive successfully processed files.
 
@@ -26,7 +26,9 @@ from typing import Generator, List, Optional
 
 import openpyxl
 
-from pipeline.models import ChangeRecord
+from helix.datetime_utils import parse_target_date
+from helix.mapper import requester_name
+from pipeline.models import WorkOrderRecord
 
 logger = logging.getLogger(__name__)
 
@@ -35,67 +37,53 @@ ARCHIVE_DIR  = "archived"
 
 # ---------------------------------------------------------------------------
 # Column alias map — maps every known Excel / CSV header variant to the
-# canonical field name used in ChangeRecord.
+# canonical field name used in WorkOrderRecord.
 # ---------------------------------------------------------------------------
 COLUMN_MAP = {
-    # Request / Task ID
-    "request id":           "request_id",
-    "requestid":            "request_id",
-    "task id":              "task_id",
-    "taskid":               "task_id",
+    # Identifier
+    "workorderid":          "work_order_id",
+    "workorder":            "work_order_id",
+    "requestid":            "work_order_id",
 
-    # Operational category — all known header spellings
-    "op cat tier 1":        "op_cat_tier1",
-    "opcattier1":           "op_cat_tier1",
-    "service cat tier 1":   "op_cat_tier1",
-    "servicecattier1":      "op_cat_tier1",
+    # Classification
+    "workordertype":        "work_order_type",
+    "categorizationtier1":  "category_tier1",
+    "operationalcategorizationtier1": "category_tier1",
 
     # Descriptive
     "summary":              "summary",
-    "assignee":             "assignee",
-    "priority":             "priority",
     "status":               "status",
-
-    # Timestamps — all real-data header variants observed
-    "create date":          "create_date",
-    "createdate":           "create_date",
-    "assign time":          "assign_time",
-    "assigntime":           "assign_time",
-
-    # Closed/actual end — "ClosedDate" is the CSV export header,
-    # "Closed Date" and "Actual End Date" appear in Excel exports
-    "closed date":          "closed_time",
-    "closeddate":           "closed_time",
-    "actual end date":      "closed_time",
-    "actualenddate":        "closed_time",
-
-    # Scheduled start
-    "scheduled start date": "scheduled_start",
-    "scheduledstart":       "scheduled_start",
-    "scheduledstartdate":   "scheduled_start",
-
-    # Scheduled end — CRITICAL: real CSV exports use "ScheduledEnd" (no underscore/space),
-    # Excel exports use "Scheduled End Date". Both must map correctly.
-    "scheduled end date":   "scheduled_end",
-    "scheduledenddate":     "scheduled_end",
-    "scheduled_end":        "scheduled_end",   # underscore variant
-    "scheduledend":         "scheduled_end",   # ← real CSV export header (no space/underscore)
-
-    # Status reason
-    "status reason":        "status_reason",
     "statusreason":         "status_reason",
-    "statusreasonselection":"status_reason",
-
-    # Assignee group
-    "assignee group":       "assignee_group",
-    "assigneegroup":        "assignee_group",
-
-    # Notes
+    "priority":             "priority",
+    "requester":            "requester",
+    "customer":             "requester",
+    "customerfirstname":    "requester_first_name",
+    "customerlastname":     "requester_last_name",
+    "supportgroupname":     "support_group",
+    "supportgroup":         "support_group",
+    "assigneegroup":        "support_group",
+    "requestassignee":      "assignee",
+    "assignee":             "assignee",
+    "detaileddescription":  "notes",
     "notes":                "notes",
+
+    # Timestamps
+    "submitdate":           "submit_date",
+    "createdate":           "submit_date",
+    "scheduledenddate":     "target_date",
+    "scheduledend":         "target_date",
+    "requireddate":         "target_date",
+    "daterequired":         "target_date",
+    "targetdate":           "target_date",
+    "completeddate":        "completed_date",
+    "actualenddate":        "completed_date",
+    "lastmodifieddate":     "last_modified",
 }
 
 _DATE_FORMATS = [
     "%m/%d/%Y, %I:%M:%S %p",
+    "%m/%d/%Y %I:%M:%S %p",
+    "%d/%m/%Y %H:%M",
     "%m/%d/%Y, %I:%M:%S.%f %p",
     "%Y-%m-%d %H:%M:%S",
     "%Y-%m-%dT%H:%M:%S",
@@ -121,36 +109,52 @@ def _parse_dt(value) -> Optional[datetime]:
 
 
 def _normalise_header(name: str) -> str:
-    # Strip spaces and underscores so "ScheduledEnd", "Scheduled_End",
-    # "Scheduled End Date" all resolve to the same COLUMN_MAP key.
-    key = name.strip().lower().replace(" ", "").replace("_", "")
+    # Strip spaces, underscores and dashes so "Work Order ID", "Work_Order_ID"
+    # and "WorkOrderID" all resolve to the same COLUMN_MAP key.
+    key = name.strip().lower().replace(" ", "").replace("_", "").replace("-", "")
     return COLUMN_MAP.get(key, name.strip())
 
 
-def _row_to_record(row_dict: dict, source: str, raw: dict) -> Optional[ChangeRecord]:
-    """Convert a normalised row dict to a ChangeRecord. Returns None if request_id is missing."""
-    rid = str(row_dict.get("request_id") or "").strip()
-    tid = str(row_dict.get("task_id") or "").strip()
-    if not rid:
+def _text(row_dict: dict, key: str) -> Optional[str]:
+    return str(row_dict.get(key) or "").strip() or None
+
+
+def _parse_target(value) -> Optional[datetime]:
+    """Target dates follow the same date-only = end-of-day rule as Helix."""
+    if isinstance(value, datetime) and value.time() == datetime.min.time():
+        return parse_target_date(value.date())
+    parsed = _parse_dt(value)
+    if parsed is None:
+        return parse_target_date(value)
+    return parsed
+
+
+def _row_to_record(row_dict: dict, source: str, raw: dict) -> Optional[WorkOrderRecord]:
+    """Convert a normalised row dict to a WorkOrderRecord; None if the ID is missing."""
+    work_order_id = _text(row_dict, "work_order_id")
+    if not work_order_id:
         return None
-    return ChangeRecord(
-        request_id      = rid,
-        task_id         = tid,
-        op_cat_tier1    = str(row_dict.get("op_cat_tier1") or "").strip() or None,
-        summary         = str(row_dict.get("summary") or "").strip() or None,
-        assignee        = str(row_dict.get("assignee") or "").strip() or None,
-        priority        = str(row_dict.get("priority") or "").strip() or None,
-        status          = str(row_dict.get("status") or "").strip() or None,
-        status_reason   = str(row_dict.get("status_reason") or "").strip() or None,
-        assignee_group  = str(row_dict.get("assignee_group") or "").strip() or None,
-        notes           = str(row_dict.get("notes") or "").strip() or None,
-        create_date     = _parse_dt(row_dict.get("create_date")),
-        assign_time     = _parse_dt(row_dict.get("assign_time")),
-        closed_time     = _parse_dt(row_dict.get("closed_time")),
-        scheduled_start = _parse_dt(row_dict.get("scheduled_start")),
-        scheduled_end   = _parse_dt(row_dict.get("scheduled_end")),
+    requester = _text(row_dict, "requester") or requester_name(
+        row_dict.get("requester_first_name"), row_dict.get("requester_last_name")
+    )
+    return WorkOrderRecord(
+        work_order_id   = work_order_id,
+        summary         = _text(row_dict, "summary"),
+        work_order_type = _text(row_dict, "work_order_type"),
+        category_tier1  = _text(row_dict, "category_tier1"),
+        status          = _text(row_dict, "status"),
+        status_reason   = _text(row_dict, "status_reason"),
+        priority        = _text(row_dict, "priority"),
+        requester       = requester,
+        support_group   = _text(row_dict, "support_group"),
+        assignee        = _text(row_dict, "assignee"),
+        notes           = _text(row_dict, "notes"),
+        submit_date     = _parse_dt(row_dict.get("submit_date")),
+        target_date     = _parse_target(row_dict.get("target_date")),
+        completed_date  = _parse_dt(row_dict.get("completed_date")),
+        last_modified   = _parse_dt(row_dict.get("last_modified")),
         source          = source,
-        raw_payload     = raw,
+        raw_payload     = {key: str(value) if value is not None else None for key, value in raw.items()},
     )
 
 
@@ -173,9 +177,9 @@ def get_pending_files(drop_dir: str | Path) -> List[Path]:
     return sorted(files)
 
 
-def extract_file(filepath: str | Path) -> Generator[List[ChangeRecord], None, None]:
+def extract_file(filepath: str | Path) -> Generator[List[WorkOrderRecord], None, None]:
     """
-    Yield batches of ChangeRecord from an Excel or CSV file.
+    Yield batches of WorkOrderRecord from an Excel or CSV file.
     Each batch is at most BATCH_SIZE records.
     """
     filepath = Path(filepath)
@@ -189,7 +193,7 @@ def extract_file(filepath: str | Path) -> Generator[List[ChangeRecord], None, No
         logger.warning("Unsupported file type: %s", suffix)
 
 
-def _extract_excel(filepath: Path) -> Generator[List[ChangeRecord], None, None]:
+def _extract_excel(filepath: Path) -> Generator[List[WorkOrderRecord], None, None]:
     """Extract records from an Excel workbook."""
     wb = openpyxl.load_workbook(filepath, read_only=True, data_only=True)
 
@@ -204,12 +208,12 @@ def _extract_excel(filepath: Path) -> Generator[List[ChangeRecord], None, None]:
         wb.close()
         return
 
-    # Find header row — scan up to 10 rows for 'Request ID'
+    # Find header row — scan up to 10 rows for the Work Order ID column
     headers = {}
     header_row_idx = None
     for i, row in enumerate(ws.iter_rows(max_row=10, values_only=True)):
         row_vals = [str(c).strip() if c is not None else "" for c in row]
-        if any("request id" in v.lower() or "requestid" in v.lower() for v in row_vals):
+        if any(_normalise_header(v) == "work_order_id" for v in row_vals if v):
             headers = {
                 _normalise_header(v): idx
                 for idx, v in enumerate(row_vals)
@@ -225,7 +229,7 @@ def _extract_excel(filepath: Path) -> Generator[List[ChangeRecord], None, None]:
 
     logger.info("Header row at row %d in %s", (header_row_idx or 0) + 1, filepath.name)
 
-    batch: List[ChangeRecord] = []
+    batch: List[WorkOrderRecord] = []
     for row in ws.iter_rows(min_row=(header_row_idx or 0) + 2, values_only=True):
         raw = {k: row[v] for k, v in headers.items() if v < len(row)}
         rec = _row_to_record(raw, source="excel", raw=raw)
@@ -242,14 +246,14 @@ def _extract_excel(filepath: Path) -> Generator[List[ChangeRecord], None, None]:
     logger.info("Extracted records from %s", filepath.name)
 
 
-def _extract_csv(filepath: Path) -> Generator[List[ChangeRecord], None, None]:
+def _extract_csv(filepath: Path) -> Generator[List[WorkOrderRecord], None, None]:
     """Extract records from a CSV file."""
     with open(filepath, newline="", encoding="utf-8-sig") as fh:
         reader = csv.DictReader(fh)
         normalised_fieldnames = [_normalise_header(h) for h in (reader.fieldnames or [])]
         reader.fieldnames = normalised_fieldnames
 
-        batch: List[ChangeRecord] = []
+        batch: List[WorkOrderRecord] = []
         for row in reader:
             raw = dict(row)
             rec = _row_to_record(raw, source="csv", raw=raw)

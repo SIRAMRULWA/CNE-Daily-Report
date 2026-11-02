@@ -1,41 +1,56 @@
 """
 config/mappings.py
 ==================
-Single source of truth for all ITIL Group Reports business logic constants.
+Single source of truth for Work Order Report business rules.
 
 Contains:
-  - AssigneeGroup â†’ Report Group mapping
-  - OpCatTier1   â†’ Report Category mapping
-  - RequestID prefix â†’ fallback category
-  - SLA thresholds by priority
-  - Delete/filter rule parameters
-  - Closed/open status sets
-  - SA public holidays
-  - Report slice definitions
+  - Default division -> support group mappings
+  - Work Order status groups
+  - SLA (target date) rule settings
+  - Division display order
 
-Changing a rule = changing it here. Nothing else.
+Every value that operations may need to tune is read from the environment so
+it can change without a code release. Changing a rule = changing it here.
 """
 
-# ---------------------------------------------------------------------------
-# 1. ASSIGNEE GROUP â†’ REPORT GROUP
-#    Pattern matching (substring), not exact equality.
-#    Order matters â€” first match wins.
-# ---------------------------------------------------------------------------
-GROUP_PATTERNS = [
-    ("Appl:TSS Operational Support:OSS", "INTSS"),
-    ("Appl:IN TELECOMS:OSS",        "INTSS"),
-    ("Appl:IN PPS:OSS",             "INTSS"),
-    ("Appl:IN:PPSQA:OSS",           "INTSS"),
-]
+import os
 
-INTSS_DAILY_ASSIGNEE_GROUPS = [
-    "Appl:TSS Operational Support:OSS",
-    "Appl:IN TELECOMS:OSS",
-    "Appl:IN PPS:OSS",
-    "Appl:IN:PPSQA:OSS",
-]
 
+def _csv_env(name: str, default: str) -> frozenset[str]:
+    raw = os.getenv(name, default)
+    return frozenset(item.strip() for item in raw.split(",") if item.strip())
+
+
+def _int_env(name: str, default: int, minimum: int = 0) -> int:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if value < minimum:
+        raise ValueError(f"{name} must be at least {minimum}")
+    return value
+
+
+def _flag_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+# ---------------------------------------------------------------------------
+# 1. DEFAULT DIVISION -> SUPPORT GROUP MAPPINGS
+#    Seed values only; the live mapping is managed in config.division_groups
+#    through the Divisions screen. Replace with the confirmed Work Order teams.
+# ---------------------------------------------------------------------------
 DEFAULT_DIVISION_GROUPS = {
+    "INTSS": [
+        "Appl:TSS Operational Support:OSS",
+        "Appl:IN TELECOMS:OSS",
+        "Appl:IN PPS:OSS",
+        "Appl:IN:PPSQA:OSS",
+    ],
     "NSD": [
         "Appl:VAS SMS:OSS",
         "Appl:VAS MMS:OSS",
@@ -64,133 +79,38 @@ DEFAULT_DIVISION_GROUPS = {
         "PSCore",
         "Appl:DATA PACKET CORE:OSS",
     ],
-    "INTSS": [
-        "Appl:TSS Operational Support:OSS",
-        "Appl:IN TELECOMS:OSS",
-        "Appl:IN PPS:OSS",
-        "Appl:IN:PPSQA:OSS",
-        "Change Mngt:IT EIT",
-    ],
 }
 
-# ---------------------------------------------------------------------------
-# 2. OPERATIONAL CATEGORY â†’ REPORT CATEGORY
-#    OpCatTier1 â†’ INCIDENT / CHANGE / ACCESS / EVENT
-# ---------------------------------------------------------------------------
-CATEGORY_MAP = {
-    "FAULTS":   "INCIDENT",
-    "CHANGE":   "CHANGE",
-    "SECURITY": "ACCESS",
-    "ACCESS":   "ACCESS",
-    "ALARM":    "EVENT",
-    "FAILURE":  "EVENT",
-}
-
-# RootRequestID prefix fallback task type when OpCatTier1 is blank.
-# INC is handled in transform.py because Summary/Notes decide whether it is
-# Security, Alarm, or Faults.
-REQUEST_PREFIX_TASK_TYPE = {
-    "CRQ": "CHANGE",
-    "WO": "WORK ORDER",
-    "PBI": "PBI",
-}
-
-EXCLUDED_OPERATIONAL_CATEGORIES = frozenset({
-    "WORK ORDER",
-    "WORKORDER",
-    "PBI",
-})
-
-EXCLUDED_REQUEST_PREFIXES = ("WO", "PBI")
-
-# Assignees whose records must never appear in operational reports.
-# Matching is case-insensitive and ignores surrounding whitespace.
-EXCLUDED_ASSIGNEES = frozenset({
-    "LEONORA DE KOCK",
-})
-
-# Work orders assigned to these group patterns are always excluded, even when
-# their operational category is Security.
-EXCLUDED_WORK_ORDER_GROUP_PATTERNS = (
-    "TSS",
-)
-
-# ---------------------------------------------------------------------------
-# 3. SLA THRESHOLDS
-#    Matches the existing INTSS SQL scripts.
-# ---------------------------------------------------------------------------
-ASSIGN_TIME_NEARING_SECONDS = 79_200
-ASSIGN_TIME_BREACH_SECONDS = 86_400
-CHANGE_SCHEDULE_GRACE_SECONDS = 1_800
-CHANGE_NEARING_WINDOW_SECONDS = 7_200
-
-# ---------------------------------------------------------------------------
-# 4. STATUS SETS
-# ---------------------------------------------------------------------------
-CLOSED_STATUSES = frozenset({
-    "Closed", "Cancelled", "Success", "Bypassed"
-})
-
-OPEN_STATUSES = frozenset({
-    "Assigned", "Staged", "Work In Progress", "Work in Progress", "Pending",
-})
-
-# ---------------------------------------------------------------------------
-# 5. DELETE / EXCLUDE RULE PARAMETERS
-# ---------------------------------------------------------------------------
-CHANGE_FUTURE_DAYS_THRESHOLD  = 1    # Changes scheduled > 1 day away â†’ exclude
-CHANGE_STALE_DAYS_THRESHOLD   = 90   # Changes scheduled > 90 days ago and still open â†’ exclude
-INCIDENT_STALE_DAYS_THRESHOLD = 30   # Incidents older than 30 days â†’ exclude
-
-# ---------------------------------------------------------------------------
-# 6. SA PUBLIC HOLIDAYS (YYYY-MM-DD) â€” update annually
-# ---------------------------------------------------------------------------
-SA_PUBLIC_HOLIDAYS = frozenset({
-    "2026-01-01",  # New Year's Day
-    "2026-03-21",  # Human Rights Day
-    "2026-04-03",  # Good Friday
-    "2026-04-06",  # Family Day
-    "2026-04-27",  # Freedom Day
-    "2026-05-01",  # Workers' Day
-    "2026-06-16",  # Youth Day
-    "2026-08-09",  # National Women's Day
-    "2026-08-10",  # Women's Day observed
-    "2026-09-24",  # Heritage Day
-    "2026-12-16",  # Day of Reconciliation
-    "2026-12-25",  # Christmas Day
-    "2026-12-26",  # Day of Goodwill
-})
-
-# ---------------------------------------------------------------------------
-# 7. REPORT SLICE DEFINITIONS
-#    Used by both the API and the dbt report_scoped model.
-#    Each entry defines which AssigneeGroup patterns qualify for a report.
-# ---------------------------------------------------------------------------
-REPORT_SLICES = {
-    "daily_intss": {
-        "report_name":  "INTSS Daily Operations Report",
-        "report_owner": "INTSS",
-        "group_patterns": INTSS_DAILY_ASSIGNEE_GROUPS,
-    },
-    "weekly_intss": {
-        "report_name":  "INTSS Weekly Major Faults Report",
-        "report_owner": "INTSS",
-        "group_patterns": [
-            "IN TELECOMS", "TSS Operational Support", "IN PPS",
-        ],
-    },
-    "cvdi_major_faults": {
-        "report_name":  "CVDI Major Faults Report",
-        "report_owner": "CVDI",
-        "group_patterns": [
-            "Core Regional Support", "DATA PACKET CORE",
-        ],
-    },
-}
-
-# ---------------------------------------------------------------------------
-# 8. PREFERRED DIVISION DISPLAY ORDER (report matrix rows)
-# ---------------------------------------------------------------------------
-DIVISION_ORDER = [
-    "INTSS", "NSD", "CDN", "CVDI",
+# Static fallback used only when database mappings cannot be loaded.
+GROUP_PATTERNS = [
+    (group, division)
+    for division, groups in DEFAULT_DIVISION_GROUPS.items()
+    for group in groups
 ]
+
+# ---------------------------------------------------------------------------
+# 2. WORK ORDER STATUS GROUPS
+# ---------------------------------------------------------------------------
+OPEN_STATUSES = _csv_env(
+    "WO_OPEN_STATUSES", "Assigned,Pending,Waiting Approval,Planning,In Progress"
+)
+CLOSED_STATUSES = _csv_env("WO_CLOSED_STATUSES", "Completed,Closed")
+EXCLUDED_STATUSES = _csv_env("WO_EXCLUDED_STATUSES", "Cancelled,Rejected,Draft")
+
+# ---------------------------------------------------------------------------
+# 3. SLA (TARGET DATE) RULES
+#    Late = the target date has passed (plus the optional grace period).
+# ---------------------------------------------------------------------------
+NEARING_WINDOW_HOURS = _int_env("WO_NEARING_WINDOW_HOURS", 24)
+GRACE_MINUTES = _int_env("WO_GRACE_MINUTES", 0)
+DATE_ONLY_END_OF_DAY = _flag_env("WO_DATE_ONLY_END_OF_DAY", True)
+
+OPEN_SLA_STATUSES = ("WITHIN_SLA", "NEARING_SLA", "BREACHED", "NO_TARGET_DATE")
+COMPLETED_SLA_STATUSES = ("MET_TARGET", "MISSED_TARGET", "NO_TARGET_DATE")
+
+UNCLASSIFIED_CATEGORY = "Unclassified"
+
+# ---------------------------------------------------------------------------
+# 4. PREFERRED DIVISION DISPLAY ORDER
+# ---------------------------------------------------------------------------
+DIVISION_ORDER = ["INTSS", "NSD", "CDN", "CVDI"]

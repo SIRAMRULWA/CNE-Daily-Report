@@ -1,11 +1,11 @@
 """
 pipeline/models.py
 ==================
-Canonical schema for a single Helix task record after ingestion.
+Canonical schema for a single Helix Work Order after ingestion.
 
-Every source adapter (Excel extractor today, Helix API tomorrow) must
-produce a list of ChangeRecord objects. Downstream transforms only consume
-this shape — they never touch raw column names directly.
+Every source adapter (Helix API, Excel or CSV export) must produce a list of
+WorkOrderRecord objects. Downstream transforms only consume this shape; they
+never touch raw source column names.
 """
 
 from dataclasses import dataclass, field
@@ -14,56 +14,40 @@ from typing import Optional
 
 
 @dataclass
-class ChangeRecord:
+class WorkOrderRecord:
     # ---- identifiers -------------------------------------------------------
-    request_id:      str              # RootRequestID  (CRQ.../INC...)
-    task_id:         str              # TaskID         (TAS...)
-
-    # ---- classification (may be blank from source) -------------------------
-    op_cat_tier1:    Optional[str]    # Service Cat Tier 1
-    assignee_group:  Optional[str]    # Assignee Group
+    work_order_id:   str                    # Work Order ID (WO...)
 
     # ---- descriptive -------------------------------------------------------
-    summary:         Optional[str]
-    assignee:        Optional[str]
-    priority:        Optional[str]    # High / Medium / Low / Critical
-    status:          Optional[str]
-    status_reason:   Optional[str]
+    summary:         Optional[str] = None
+    work_order_type: Optional[str] = None   # Work Order Type
+    category_tier1:  Optional[str] = None   # Categorization Tier 1 (fallback type)
+    status:          Optional[str] = None
+    status_reason:   Optional[str] = None
+    priority:        Optional[str] = None   # Critical / High / Medium / Low
+    requester:       Optional[str] = None
+    support_group:   Optional[str] = None   # Support Group Name
+    assignee:        Optional[str] = None   # Request Assignee
+    notes:           Optional[str] = None
 
-    # ---- timestamps --------------------------------------------------------
-    create_date:     Optional[datetime]
-    assign_time:     Optional[datetime]
-    closed_time:     Optional[datetime]   # Actual End Date
-    scheduled_start: Optional[datetime]
-    scheduled_end:   Optional[datetime]
-
-    # ---- free text ---------------------------------------------------------
-    notes:           Optional[str]
+    # ---- timestamps (workspace-local, naive) --------------------------------
+    submit_date:     Optional[datetime] = None
+    target_date:     Optional[datetime] = None   # SLA due date
+    completed_date:  Optional[datetime] = None
+    last_modified:   Optional[datetime] = None
 
     # ---- extraction context ------------------------------------------------
-    source:          str = "csv"          # "csv" | "excel" | "helix_api"
-    raw_payload:     Optional[dict] = field(default=None)  # full source row
+    source:          str = "helix_api"           # "csv" | "excel" | "helix_api"
+    raw_payload:     Optional[dict] = field(default=None)
 
     # ---- derived (populated by transform layer) ----------------------------
-    report_group:    Optional[str] = field(default=None)
+    division:        Optional[str] = field(default=None)
     report_category: Optional[str] = field(default=None)
     sla_status:      Optional[str] = field(default=None)
     hours_open:      Optional[float] = field(default=None)
-    exclude_change:  bool = field(default=False)
-    exclude_incident:bool = field(default=False)
-
-    # ---- convenience -------------------------------------------------------
-    @property
-    def is_change(self) -> bool:
-        return (self.request_id or "").upper().startswith("CRQ")
-
-    @property
-    def is_incident(self) -> bool:
-        return (self.request_id or "").upper().startswith("INC")
-
-    @property
-    def is_excluded(self) -> bool:
-        return self.exclude_change or self.exclude_incident
+    days_to_target:  Optional[int] = field(default=None)   # negative = overdue
+    is_open:         bool = field(default=False)   # status is in OPEN_STATUSES
+    is_excluded:     bool = field(default=False)
 
     @property
     def priority_normalised(self) -> str:
@@ -73,7 +57,6 @@ class ChangeRecord:
 
     def __repr__(self) -> str:
         return (
-            f"ChangeRecord({self.request_id}/{self.task_id} | "
-            f"cat={self.report_category} | sla={self.sla_status} | "
-            f"grp={self.report_group} | excl={self.is_excluded})"
+            f"WorkOrderRecord({self.work_order_id} | type={self.report_category} | "
+            f"sla={self.sla_status} | div={self.division} | excl={self.is_excluded})"
         )

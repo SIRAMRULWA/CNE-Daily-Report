@@ -4,13 +4,11 @@
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-# Refresh the Daily Report at 07:00 every day, including weekends. This keeps
-# successful-closure reporting in exact daily 07:00-to-07:00 windows.
-0 7 * * * cd /opt/itil-report-stack/current && /usr/bin/podman exec itil-backend-api bash /app/deploy/run-pipeline.sh >> /opt/itil-report-stack/shared/logs/pipeline-cron.log 2>&1
+# Refresh the Work Order report at 07:15 every day, including weekends. It runs
+# 15 minutes after the Daily Report pipeline so both do not query Helix at
+# once. Completed Work Orders are still counted in exact 07:00-to-07:00 windows.
+15 7 * * * cd /opt/wo-report-stack/current && /usr/bin/podman exec wo-backend-api bash /app/deploy/run-pipeline.sh >> /opt/wo-report-stack/shared/logs/pipeline-cron.log 2>&1
 
 # Enforce the seven-calendar-day business-data window independently of the
 # pipeline outcome. Audit, security, configuration, and run logs are preserved.
-0 8 * * * cd /opt/itil-report-stack/current && /usr/bin/podman exec itil-backend-api bash /app/deploy/run-retention.sh >> /opt/itil-report-stack/shared/logs/retention-cron.log 2>&1
-
-# Report-email and task-reminder due checks run inside the API process. Do not
-# add separate sender cron jobs while those internal schedulers are enabled.
+15 8 * * * cd /opt/wo-report-stack/current && /usr/bin/podman exec wo-backend-api bash /app/deploy/run-retention.sh >> /opt/wo-report-stack/shared/logs/retention-cron.log 2>&1

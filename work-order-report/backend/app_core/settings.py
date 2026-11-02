@@ -60,18 +60,9 @@ class DatabaseSettings:
 
 
 @dataclass(frozen=True)
-class SchedulerSettings:
-    report_email_enabled: bool
-    report_email_interval_seconds: int
-    task_reminder_enabled: bool
-    task_reminder_interval_seconds: int
-
-
-@dataclass(frozen=True)
 class AppSettings:
     runtime: RuntimeSettings
     database: DatabaseSettings
-    schedulers: SchedulerSettings
 
     @classmethod
     def from_env(cls) -> "AppSettings":
@@ -96,22 +87,12 @@ class AppSettings:
                 url=os.getenv("DATABASE_URL") or None,
                 host=os.getenv("DB_HOST", "localhost"),
                 port=_positive_int("DB_PORT", 5432),
-                name=os.getenv("DB_NAME", "itil_reports"),
+                name=os.getenv("DB_NAME", "wo_reports"),
                 user=os.getenv("DB_USER", "postgres"),
                 password=os.getenv("DB_PASSWORD", ""),
                 connect_timeout=_positive_int("DB_CONNECT_TIMEOUT", 5),
                 connect_retries=_positive_int("DB_CONNECT_RETRIES", 3),
                 retry_delay_seconds=max(float(os.getenv("DB_RETRY_DELAY_SECONDS", "2")), 0),
-            ),
-            schedulers=SchedulerSettings(
-                report_email_enabled=env_flag("REPORT_EMAIL_SCHEDULER_ENABLED", True),
-                report_email_interval_seconds=_positive_int(
-                    "REPORT_EMAIL_SCHEDULER_INTERVAL_SECONDS", 60, minimum=30
-                ),
-                task_reminder_enabled=env_flag("TASK_REMINDER_SCHEDULER_ENABLED", True),
-                task_reminder_interval_seconds=_positive_int(
-                    "TASK_REMINDER_SCHEDULER_INTERVAL_SECONDS", 60, minimum=30
-                ),
             ),
         )
 

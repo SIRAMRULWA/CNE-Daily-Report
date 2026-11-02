@@ -5,7 +5,10 @@ from zoneinfo import ZoneInfo
 
 from dateutil import parser as date_parser
 
+from config.mappings import DATE_ONLY_END_OF_DAY
 from helix.config import WORKSPACE_TIMEZONE
+
+_DATE_ONLY_LENGTH = len("YYYY-MM-DD")
 
 
 def naive_workspace_datetime(value: datetime) -> datetime:
@@ -65,3 +68,41 @@ def format_helix_timestamp(
         dt = dt.replace(tzinfo=ZoneInfo(WORKSPACE_TIMEZONE))
     return str(int(dt.timestamp()))
 
+
+
+def is_date_only(value) -> bool:
+    """True when a source value carries a calendar date but no time of day."""
+    if isinstance(value, datetime):
+        return False
+    if isinstance(value, date):
+        return True
+    raw = str(value or "").strip()
+    # Epoch values (all digits) carry a time; only dashed/slashed dates qualify.
+    if not raw or len(raw) > _DATE_ONLY_LENGTH or not any(c in raw for c in "-/"):
+        return False
+    try:
+        date_parser.parse(raw)
+    except (ValueError, TypeError, OverflowError):
+        return False
+    return True
+
+
+def end_of_day(value: datetime) -> datetime:
+    return datetime.combine(value.date(), datetime_time(23, 59, 59))
+
+
+def parse_target_date(value) -> datetime | None:
+    """Parse a Work Order target date.
+
+    A date with no time of day is due at the end of that day (23:59:59 local),
+    so a Work Order is not shown as late from midnight on its own due date.
+    """
+    if value is None:
+        return None
+    if isinstance(value, date) and not isinstance(value, datetime):
+        value = datetime.combine(value, datetime_time.min)
+        return end_of_day(value) if DATE_ONLY_END_OF_DAY else value
+    parsed = parse_helix_datetime(value)
+    if parsed is not None and DATE_ONLY_END_OF_DAY and is_date_only(value):
+        return end_of_day(parsed)
+    return parsed

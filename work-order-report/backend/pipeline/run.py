@@ -1,7 +1,7 @@
 """
 pipeline/run.py
 ===============
-ITIL Group Reports Automation - Pipeline Orchestrator.
+Work Order Report - Pipeline Orchestrator.
 
 Coordinates file or Helix API ingestion through the same transform, load, dbt,
 and heartbeat flow.
@@ -28,7 +28,7 @@ load_dotenv()
 from app_core.clock import workspace_now_naive
 from pipeline.db import test_connection
 from pipeline.extract import archive_file, extract_file, get_pending_files
-from pipeline.load import close_run, get_watermark, load_changes, open_run, set_watermark, update_heartbeat
+from pipeline.load import close_run, get_watermark, load_work_orders, open_run, set_watermark, update_heartbeat
 from pipeline.transform import transform_records
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -40,11 +40,11 @@ logging.basicConfig(
 logger = logging.getLogger("pipeline.run")
 
 EXCEL_DROP_DIR = os.getenv("EXCEL_DROP_DIR", "./data/excel_drop")
-PIPELINE_NAME = "itil_group_reports"
-SOURCE_ENTITY = "daily_changes"
+PIPELINE_NAME = "work_order_report"
+SOURCE_ENTITY = "work_orders"
 DBT_DIR = Path(__file__).parent.parent / "dbt"
 HELIX_SOURCE_NAME = "helix_api"
-HELIX_ENTITY_NAME = "TMS:Task"
+HELIX_ENTITY_NAME = os.getenv("HELIX_FORM", "WOI:WorkOrder")
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -151,7 +151,7 @@ def _process_file(
         for batch in extract_file(filepath):
             total_extracted += len(batch)
             transform_records(batch, as_of=as_of)
-            loaded, rejected = load_changes(batch, run_id=run_id)
+            loaded, rejected = load_work_orders(batch, run_id=run_id)
             total_loaded += loaded
             total_rejected += rejected
 
@@ -209,16 +209,13 @@ def _period_bounds(period: str | None) -> tuple[str | None, str | None]:
 
 def _helix_watermark_value(record) -> datetime | None:
     """Return the record timestamp matching HELIX_DATE_FIELD."""
-    field = os.getenv("HELIX_DATE_FIELD", "Create Date").strip().lower()
+    field = os.getenv("HELIX_DATE_FIELD", "Submit Date").strip().lower()
     field_map = {
-        "create date": record.create_date,
-        "assign time": record.assign_time,
-        "actual end date": record.closed_time,
-        "closed date": record.closed_time,
-        "scheduled start date": record.scheduled_start,
-        "scheduled end date": record.scheduled_end,
+        "submit date": record.submit_date,
+        "last modified date": record.last_modified,
+        "completed date": record.completed_date,
     }
-    return field_map.get(field, record.create_date)
+    return field_map.get(field, record.submit_date)
 
 
 def _process_helix(
@@ -249,7 +246,7 @@ def _process_helix(
     success = True
 
     try:
-        for batch in extractor.extract_changes(since=since, start_date=start_date, end_date=end_date):
+        for batch in extractor.extract_work_orders(since=since, start_date=start_date, end_date=end_date):
             total_extracted += len(batch)
             for record in batch:
                 record_latest = _helix_watermark_value(record)
@@ -257,7 +254,7 @@ def _process_helix(
                     latest_seen = record_latest
 
             transform_records(batch, as_of=as_of)
-            loaded, rejected = load_changes(batch, run_id=run_id, source=HELIX_SOURCE_NAME)
+            loaded, rejected = load_work_orders(batch, run_id=run_id, source=HELIX_SOURCE_NAME)
             total_loaded += loaded
             total_rejected += rejected
 
@@ -312,7 +309,7 @@ def run(
             sys.exit(1)
 
     logger.info("=" * 60)
-    logger.info("ITIL Group Reports Automation - %s", as_of.strftime("%Y-%m-%d %H:%M"))
+    logger.info("Work Order Report - %s", as_of.strftime("%Y-%m-%d %H:%M"))
     logger.info("Mode: %s | Source: %s | Environment: %s", mode, source, os.getenv("ENVIRONMENT", "dev"))
     logger.info("=" * 60)
 
@@ -379,7 +376,7 @@ def run(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="ITIL Group Reports Pipeline")
+    parser = argparse.ArgumentParser(description="Work Order Report Pipeline")
     parser.add_argument("--file", default=None, help="Process a single file (no archiving)")
     parser.add_argument("--mode", default="incremental", choices=["incremental", "full_refresh"])
     parser.add_argument("--source", default="file", choices=["file", "helix"], help="Use file or Helix API ingestion")

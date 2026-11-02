@@ -21,19 +21,6 @@ class ArchitectureFoundationTests(unittest.TestCase):
     def test_existing_audit_import_is_a_compatibility_export(self):
         self.assertIs(core_audit_event, compatibility_audit_event)
 
-    def test_notifications_do_not_depend_on_api_package(self):
-        violations = []
-        for source_path in (ROOT / "notifications").glob("*.py"):
-            tree = ast.parse(source_path.read_text(encoding="utf-8"))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("api"):
-                    violations.append(f"{source_path.name}:{node.lineno}")
-                elif isinstance(node, ast.Import):
-                    for alias in node.names:
-                        if alias.name.startswith("api"):
-                            violations.append(f"{source_path.name}:{node.lineno}")
-        self.assertEqual([], violations)
-
     def test_division_router_contains_no_sql(self):
         source = (ROOT / "api" / "routers" / "divisions.py").read_text(
             encoding="utf-8"
@@ -45,36 +32,6 @@ class ArchitectureFoundationTests(unittest.TestCase):
                 violations.append(f"pipeline.db import at line {node.lineno}")
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
                 if node.func.id in {"run_query", "get_cursor"}:
-                    violations.append(f"{node.func.id} call at line {node.lineno}")
-        self.assertEqual([], violations)
-
-    def test_report_email_router_contains_no_persistence_or_transport(self):
-        source_path = ROOT / "api" / "routers" / "report_emails.py"
-        tree = ast.parse(source_path.read_text(encoding="utf-8"))
-        forbidden_modules = {"pipeline.db", "notifications.transport", "notifications.reports"}
-        violations = []
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module in forbidden_modules:
-                violations.append(f"{node.module} import at line {node.lineno}")
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-                if node.func.id in {"run_query", "get_cursor", "configured_transport"}:
-                    violations.append(f"{node.func.id} call at line {node.lineno}")
-        self.assertEqual([], violations)
-
-    def test_task_reminder_router_contains_no_persistence_or_execution_engine(self):
-        source_path = ROOT / "api" / "routers" / "task_reminders.py"
-        tree = ast.parse(source_path.read_text(encoding="utf-8"))
-        forbidden_modules = {
-            "pipeline.db",
-            "notifications.task_reminders",
-            "notifications.transport",
-        }
-        violations = []
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module in forbidden_modules:
-                violations.append(f"{node.module} import at line {node.lineno}")
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-                if node.func.id in {"run_query", "get_cursor", "execute"}:
                     violations.append(f"{node.func.id} call at line {node.lineno}")
         self.assertEqual([], violations)
 
@@ -91,11 +48,14 @@ class ArchitectureFoundationTests(unittest.TestCase):
                 violations.append(f"requests import at line {node.lineno}")
         self.assertEqual([], violations)
 
+    def test_phase_two_email_and_reminder_code_is_not_shipped(self):
+        for path in ("notifications", "capabilities/report_delivery",
+                     "capabilities/task_reminders", "api/routers/testing_cleanup.py"):
+            with self.subTest(path=path):
+                self.assertFalse((ROOT / path).exists())
+
     def test_daily_report_http_and_rendering_adapters_contain_no_sql(self):
-        paths = [
-            ROOT / "api" / "routers" / "daily_report.py",
-            ROOT / "notifications" / "reports.py",
-        ]
+        paths = [ROOT / "api" / "routers" / "daily_report.py"]
         violations = []
         for source_path in paths:
             tree = ast.parse(source_path.read_text(encoding="utf-8"))
@@ -143,16 +103,12 @@ class ArchitectureFoundationTests(unittest.TestCase):
             "ENVIRONMENT": "QA",
             "WORKSPACE_TIMEZONE": "Africa/Johannesburg",
             "DB_PORT": "5433",
-            "REPORT_EMAIL_SCHEDULER_ENABLED": "false",
-            "TASK_REMINDER_SCHEDULER_INTERVAL_SECONDS": "90",
         }
         with patch.dict(os.environ, values, clear=True):
             settings = AppSettings.from_env()
         self.assertEqual("qa", settings.runtime.environment)
         self.assertEqual("Africa/Johannesburg", settings.runtime.workspace_timezone)
         self.assertEqual(5433, settings.database.port)
-        self.assertFalse(settings.schedulers.report_email_enabled)
-        self.assertEqual(90, settings.schedulers.task_reminder_interval_seconds)
         self.assertFalse(settings.runtime.runtime_schema_bootstrap_enabled)
 
     def test_workspace_clock_conversion_preserves_instant(self):

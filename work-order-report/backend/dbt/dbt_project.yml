@@ -1,8 +1,8 @@
-name: 'itil_group_reports'
+name: 'work_order_report'
 version: '1.0.0'
 config-version: 2
 
-profile: 'itil_group_reports'
+profile: 'work_order_report'
 
 model-paths: ["models"]
 # seed-paths:  ["seeds"]
@@ -12,7 +12,7 @@ log-path:    "logs"
 target-path: "target"
 
 models:
-  itil_group_reports:
+  work_order_report:
     staging:
       +materialized: view
       +schema: staging
@@ -21,13 +21,5 @@ models:
       +schema: reporting
 
 # seeds:
-#   itil_group_reports:
+#   work_order_report:
 #     +schema: staging
-
-vars:
-  nearing_sla_hours_medium: 4
-  nearing_sla_hours_high: 2
-  nearing_sla_hours_low: 8
-  change_future_days: 1
-  change_stale_days: 90
-  incident_stale_days: 30

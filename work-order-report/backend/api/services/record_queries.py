@@ -1,7 +1,10 @@
 """
 api/services/record_queries.py
 ==============================
-Shared raw-change query helpers for records and workspace endpoints.
+Current Work Order queries for the records and workspace endpoints.
+
+Reads staging.raw_work_orders, limited to rows loaded by today's pipeline run,
+so these screens show the latest load rather than a frozen snapshot.
 """
 
 import os
@@ -14,9 +17,17 @@ from pipeline.db import run_query
 
 WORKSPACE_TIMEZONE = os.getenv("WORKSPACE_TIMEZONE", "Africa/Johannesburg")
 
+SLA_ORDER_SQL = """CASE sla_status
+    WHEN 'BREACHED' THEN 1
+    WHEN 'NEARING_SLA' THEN 2
+    WHEN 'NO_TARGET_DATE' THEN 3
+    WHEN 'WITHIN_SLA' THEN 4
+    ELSE 5
+END"""
+
 
 def _today_filter() -> tuple[str, list[str]]:
-    """Restrict live Operations Console data to records loaded today."""
+    """Restrict current data to Work Orders loaded today (workspace time)."""
     condition = """
         loaded_at >= (
             date_trunc('day', CURRENT_TIMESTAMP AT TIME ZONE %s)
@@ -49,18 +60,16 @@ def build_record_filters(
     search: Optional[str] = None,
     include_excluded: bool = False,
 ) -> tuple[list[str], list]:
-    today_condition, today_params = _today_filter()
+    today_condition, params = _today_filter()
     conditions = [today_condition]
-    params: list = today_params
 
     if not include_excluded:
-        conditions.append("NOT (exclude_change OR exclude_incident)")
-
+        conditions.extend(["is_open", "NOT is_excluded"])
     if division:
-        conditions.append("report_group = %s")
+        conditions.append("division = %s")
         params.append(division)
     if assignee_group:
-        conditions.append("assignee_group = %s")
+        conditions.append("support_group = %s")
         params.append(assignee_group)
     if sla:
         conditions.append("sla_status = %s")
@@ -73,10 +82,10 @@ def build_record_filters(
         params.append(priority)
     if search:
         conditions.append(
-            "(request_id ILIKE %s OR task_id ILIKE %s OR summary ILIKE %s OR assignee ILIKE %s)"
+            "(work_order_id ILIKE %s OR summary ILIKE %s OR assignee ILIKE %s OR requester ILIKE %s)"
         )
         pattern = f"%{search}%"
-        params.extend([pattern, pattern, pattern, pattern])
+        params.extend([pattern] * 4)
 
     return conditions, params
 
@@ -102,80 +111,60 @@ def list_records(
         search=search,
         include_excluded=include_excluded,
     )
-    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-    params.extend([limit, offset])
+    where = "WHERE " + " AND ".join(conditions)
 
     detail_columns = """
-            CASE
-                WHEN report_category = 'CHANGE' AND scheduled_end IS NOT NULL
-                    THEN scheduled_end + INTERVAL '30 minutes'
-                WHEN report_category IN ('INCIDENT', 'ACCESS', 'EVENT') AND assign_time IS NOT NULL
-                    THEN assign_time + INTERVAL '24 hours'
-                ELSE NULL
-            END AS due_at,
-            CASE
-                WHEN report_category = 'CHANGE' AND scheduled_end IS NOT NULL
-                    THEN EXTRACT(EPOCH FROM ((scheduled_end + INTERVAL '30 minutes') - NOW()))::INT
-                WHEN report_category IN ('INCIDENT', 'ACCESS', 'EVENT') AND assign_time IS NOT NULL
-                    THEN EXTRACT(EPOCH FROM ((assign_time + INTERVAL '24 hours') - NOW()))::INT
-                ELSE NULL
+            target_date AS due_at,
+            CASE WHEN target_date IS NOT NULL
+                THEN EXTRACT(EPOCH FROM (
+                    target_date - (CURRENT_TIMESTAMP AT TIME ZONE %s)
+                ))::INT
             END AS seconds_to_breach,
     """ if detailed else ""
+    detail_params = [WORKSPACE_TIMEZONE] if detailed else []
 
     rows = run_query(
         f"""
         SELECT
-            request_id,
-            task_id,
-            report_group AS division,
-            report_group,
-            assignee_group,
+            work_order_id,
+            division,
+            support_group,
+            support_group AS assignee_group,
             report_category,
             sla_status,
             priority,
             status,
             status_reason,
+            requester,
             assignee,
             summary,
             ROUND(hours_open::NUMERIC, 2) AS hours_open,
-            assign_time,
-            scheduled_start,
-            scheduled_end,
-            closed_time,
+            days_to_target,
+            submit_date,
+            target_date,
+            completed_date,
             {detail_columns}
-            exclude_change,
-            exclude_incident,
+            is_open,
+            is_excluded,
             source,
             loaded_at
-        FROM staging.raw_changes
+        FROM staging.raw_work_orders
         {where}
-        ORDER BY
-            CASE sla_status
-                WHEN 'BREACHED' THEN 1
-                WHEN 'NEARING_SLA' THEN 2
-                WHEN 'NO_SCHEDULE' THEN 3
-                WHEN 'NO_ASSIGN_TIME' THEN 4
-                ELSE 5
-            END,
-            report_group,
-            assignee_group,
-            assign_time DESC NULLS LAST
+        ORDER BY {SLA_ORDER_SQL}, days_to_target NULLS LAST, division, support_group
         LIMIT %s OFFSET %s
         """,
+        tuple(detail_params + params + [limit, offset]),
+    )
+    total = run_query(
+        f"SELECT COUNT(*) AS total FROM staging.raw_work_orders {where}",
         tuple(params),
     )
-
-    total = run_query(
-        f"SELECT COUNT(*) AS total FROM staging.raw_changes {where}",
-        tuple(params[:-2]) if params[:-2] else None,
-    )
-
     total_records = int(total[0]["total"]) if total else 0
     return {
         **_workspace_metadata(total_records),
         "records": rows,
         "count": len(rows),
-        "total": total[0]["total"] if total else 0,
+        "total": total_records,
         "limit": limit,
         "offset": offset,
     }
@@ -191,40 +180,27 @@ def summarize_records(
         assignee_group=assignee_group,
         include_excluded=include_excluded,
     )
-    conditions.extend([
-        "report_group IS NOT NULL",
-        "report_category IN ('INCIDENT','CHANGE','ACCESS','EVENT')",
-    ])
+    conditions.append("division IS NOT NULL")
     where = "WHERE " + " AND ".join(conditions)
 
     rows = run_query(
         f"""
         SELECT
-            report_group AS division,
-            assignee_group,
+            division,
+            support_group,
+            support_group AS assignee_group,
             sla_status,
             report_category,
             COUNT(*) AS record_count,
             ROUND(AVG(hours_open)::NUMERIC, 2) AS avg_hours_open,
             MAX(loaded_at) AS last_loaded_at
-        FROM staging.raw_changes
+        FROM staging.raw_work_orders
         {where}
-        GROUP BY report_group, assignee_group, sla_status, report_category
-        ORDER BY
-            report_group,
-            assignee_group,
-            CASE sla_status
-                WHEN 'BREACHED' THEN 1
-                WHEN 'NEARING_SLA' THEN 2
-                WHEN 'NO_SCHEDULE' THEN 3
-                WHEN 'NO_ASSIGN_TIME' THEN 4
-                ELSE 5
-            END,
-            report_category
+        GROUP BY division, support_group, sla_status, report_category
+        ORDER BY division, support_group, {SLA_ORDER_SQL}, report_category
         """,
-        tuple(params) if params else None,
+        tuple(params),
     )
-
     total_records = sum(int(row["record_count"]) for row in rows)
     return {
         **_workspace_metadata(total_records),
@@ -232,51 +208,3 @@ def summarize_records(
         "count": len(rows),
         "total_records": total_records,
     }
-
-
-def get_record_by_request_id(request_id: str) -> dict | None:
-    rows = run_query(
-        """
-        SELECT *
-        FROM staging.raw_changes
-        WHERE request_id = %s
-        ORDER BY loaded_at DESC
-        LIMIT 1
-        """,
-        (request_id,),
-    )
-    return rows[0] if rows else None
-
-
-def list_excluded_records(limit: int = 200) -> dict:
-    rows = run_query(
-        """
-        SELECT
-            request_id,
-            task_id,
-            report_group,
-            report_category,
-            sla_status,
-            status,
-            scheduled_end,
-            exclude_change,
-            exclude_incident,
-            CASE
-                WHEN exclude_change AND scheduled_end IS NULL  THEN 'No schedule date'
-                WHEN exclude_change AND scheduled_end < NOW() - INTERVAL '90 days'
-                    THEN 'Stale change (> 90 days)'
-                WHEN exclude_change AND scheduled_end > NOW() + INTERVAL '1 day'
-                    THEN 'Scheduled too far in future'
-                WHEN exclude_change THEN 'Weekend/holiday exclusion or closed'
-                WHEN exclude_incident THEN 'Incident closed or stale'
-                ELSE 'Unknown'
-            END AS exclusion_reason,
-            loaded_at
-        FROM staging.raw_changes
-        WHERE exclude_change OR exclude_incident
-        ORDER BY loaded_at DESC
-        LIMIT %s
-        """,
-        (limit,),
-    )
-    return {"records": rows, "count": len(rows)}

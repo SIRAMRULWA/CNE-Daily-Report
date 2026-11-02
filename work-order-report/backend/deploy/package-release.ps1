@@ -6,8 +6,8 @@ $ErrorActionPreference = "Stop"
 
 $root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $dist = Join-Path $root "dist"
-$staging = Join-Path $dist "itil-group-reports-$Version"
-$zip = Join-Path $dist "itil-group-reports-$Version.zip"
+$staging = Join-Path $dist "work-order-report-$Version"
+$zip = Join-Path $dist "work-order-report-$Version.zip"
 
 if (Test-Path $staging) {
     Remove-Item -LiteralPath $staging -Recurse -Force

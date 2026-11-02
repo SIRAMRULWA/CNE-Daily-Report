@@ -3,7 +3,7 @@ api/routers/health.py
 =====================
 Health and observability endpoints.
 
-GET /api/v1/health         — API + pipeline status and record counts
+GET /api/v1/health         — API + pipeline status and Work Order counts
 GET /api/v1/pipeline-runs  — Recent pipeline run history
 """
 
@@ -15,43 +15,24 @@ from pipeline.db import run_query
 
 def health():
     """
-    Returns API status, last pipeline run time, and record totals.
-    Used by Power BI to verify data freshness before report refresh.
+    Returns API status, last pipeline run time, and Work Order totals.
+    Used by monitoring to verify data freshness.
     """
     heartbeat_rows = run_query(
         "SELECT last_run_at, last_run_status, updated_at "
         "FROM reporting.pipeline_heartbeat WHERE id = 1"
     )
-    count_rows = run_query(
-        "SELECT COUNT(*) AS total FROM staging.raw_changes"
+    counts = run_query(
+        """
+        SELECT
+            COUNT(*) AS total,
+            COUNT(*) FILTER (WHERE is_open AND NOT is_excluded) AS active,
+            COUNT(*) FILTER (WHERE is_open AND NOT is_excluded AND sla_status = 'BREACHED') AS breached
+        FROM staging.raw_work_orders
+        """
     )
-    active_rows = run_query(
-        "SELECT COUNT(*) AS active FROM staging.raw_changes "
-        "WHERE NOT (exclude_change OR exclude_incident) "
-        "AND sla_status NOT IN ('CLOSED')"
-    )
-    breached_rows = run_query(
-        "SELECT COUNT(*) AS breached FROM staging.raw_changes "
-        "WHERE sla_status = 'BREACHED' "
-        "AND NOT (exclude_change OR exclude_incident)"
-    )
-
+    totals = counts[0] if counts else {}
     hb = heartbeat_rows[0] if heartbeat_rows else {}
-    reminder_table = run_query(
-        "SELECT to_regclass('reporting.task_reminder_executions') IS NOT NULL AS exists"
-    )
-    reminder_status = {"configured": False, "failed_last_24_hours": 0, "last_execution_at": None}
-    if reminder_table and reminder_table[0]["exists"]:
-        reminder_rows = run_query(
-            """SELECT COUNT(*) FILTER (WHERE status='FAILED' AND started_at >= NOW()-INTERVAL '24 hours') AS failed,
-                      MAX(started_at) AS last_execution_at
-               FROM reporting.task_reminder_executions"""
-        )
-        reminder_status = {
-            "configured": True,
-            "failed_last_24_hours": int(reminder_rows[0]["failed"] or 0) if reminder_rows else 0,
-            "last_execution_at": reminder_rows[0]["last_execution_at"] if reminder_rows else None,
-        }
 
     return {
         "status": "ok",
@@ -61,12 +42,11 @@ def health():
             "last_run_status": hb.get("last_run_status"),
             "updated_at":      hb.get("updated_at"),
         },
-        "records": {
-            "total":   count_rows[0]["total"]   if count_rows   else 0,
-            "active":  active_rows[0]["active"]  if active_rows  else 0,
-            "breached":breached_rows[0]["breached"] if breached_rows else 0,
+        "work_orders": {
+            "total":    totals.get("total", 0) or 0,
+            "active":   totals.get("active", 0) or 0,
+            "breached": totals.get("breached", 0) or 0,
         },
-        "task_reminders": reminder_status,
     }
 
 

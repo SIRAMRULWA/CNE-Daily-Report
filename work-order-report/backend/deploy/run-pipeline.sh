@@ -26,7 +26,3 @@ if [ "$SOURCE" = "helix" ]; then
 else
   python pipeline/run.py --source file
 fi
-
-# Fully unattended delivery: this is safe to run after every pipeline refresh.
-# The sender checks schedule, freshness, enabled subscriptions and idempotency.
-python -m notifications.sender

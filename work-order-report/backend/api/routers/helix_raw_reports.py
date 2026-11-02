@@ -7,17 +7,29 @@ from fastapi import HTTPException, Request
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from api.auth import audit_event
-from config.mappings import CLOSED_STATUSES
-from helix.extractor import (
+from config.mappings import CLOSED_STATUSES, OPEN_STATUSES
+from helix.config import (
+    DATE_FIELD,
     HELIX_FIELD_MAP,
+    HELIX_FORM,
     HELIX_RAW_REPORT_DATE_FIELDS,
-    HelixExtractor,
 )
+from helix.extractor import RAW_REPORT_FIELDS, HelixExtractor
 from pipeline.division_groups import list_division_groups
+
+DERIVED_SLA_FIELDS = [
+    "report_category",
+    "sla_status",
+    "hours_open",
+    "days_to_target",
+    "sla_calculated_at",
+]
+
+
 class RawReportRequest(BaseModel):
     start: datetime | None = None
     end: datetime | None = None
-    date_field: str = "Create Date"
+    date_field: str = DATE_FIELD
     fields: list[str] | None = None
     divisions: list[str] | None = None
     assignee_groups: list[str] | None = None
@@ -26,18 +38,17 @@ class RawReportRequest(BaseModel):
     include_closed: bool = Field(
         default=False,
         description=(
-            "Include Closed, Cancelled, Success, and Bypassed tasks when "
-            "statuses is also supplied. Omit statuses to return every status."
+            "Include the completed statuses when statuses is also supplied. "
+            "Omit statuses to return every status."
         ),
     )
     categories: list[str] | None = None
-    request_ids: list[str] | None = None
-    task_ids: list[str] | None = None
+    work_order_ids: list[str] | None = None
     calculate_sla: bool = Field(
         default=False,
         description=(
-            "Add report_category, sla_status, and hours_open using the "
-            "Daily Report SLA rules. This calculation is read-only."
+            "Add report_category, sla_status, hours_open and days_to_target "
+            "using the Work Order report SLA rules. This calculation is read-only."
         ),
     )
     limit: int = Field(default=5000, ge=1, le=100000)
@@ -58,7 +69,7 @@ class RawReportRequest(BaseModel):
         if not value:
             raise ValueError("fields cannot be empty; omit it to return every mapped field")
         deduped = list(dict.fromkeys(value))
-        unknown = sorted(set(deduped) - set(HELIX_FIELD_MAP.values()))
+        unknown = sorted(set(deduped) - set(RAW_REPORT_FIELDS))
         if unknown:
             raise ValueError(f"Unsupported fields: {', '.join(unknown)}")
         return deduped
@@ -69,8 +80,7 @@ class RawReportRequest(BaseModel):
         "assignees",
         "statuses",
         "categories",
-        "request_ids",
-        "task_ids",
+        "work_order_ids",
     )
     @classmethod
     def clean_filters(cls, value: list[str] | None) -> list[str] | None:
@@ -87,34 +97,35 @@ class RawReportRequest(BaseModel):
             raise ValueError("start and end must be supplied together")
         if self.start is not None and self.end is not None and self.end < self.start:
             raise ValueError("end must be on or after start")
-        if self.start is None and not (self.request_ids or self.task_ids):
-            raise ValueError("Supply a date range, request_ids, or task_ids")
+        if self.start is None and not self.work_order_ids:
+            raise ValueError("Supply a date range or work_order_ids")
         return self
 
 
 def raw_report_fields():
     """Return the allow-listed fields and supported time-range columns."""
+    source_by_canonical = {canonical: source for source, canonical in HELIX_FIELD_MAP.items()}
     return {
+        "form": HELIX_FORM,
         "fields": [
-            {"name": canonical, "helix_field": source}
-            for source, canonical in HELIX_FIELD_MAP.items()
+            {
+                "name": name,
+                "helix_field": source_by_canonical.get(
+                    name, "Customer First Name + Customer Last Name"
+                ),
+            }
+            for name in RAW_REPORT_FIELDS
         ],
         "date_fields": sorted(HELIX_RAW_REPORT_DATE_FIELDS),
-        "default_date_field": "Create Date",
-        "common_statuses": ["Assigned", "Staged", "Work in Progress", "Pending"],
+        "default_date_field": DATE_FIELD,
+        "common_statuses": sorted(OPEN_STATUSES),
         "closed_statuses": sorted(CLOSED_STATUSES),
         "status_filter_help": (
-            "Omit statuses to return every status, including closed tasks. "
-            "When filtering open statuses, set include_closed=true to add all "
-            "recognized closed statuses."
+            "Omit statuses to return every status, including completed Work "
+            "Orders. When filtering open statuses, set include_closed=true to "
+            "add the completed statuses."
         ),
-        "derived_categories": ["Faults", "Security", "Alarm", "Change", "Work Order", "PBI"],
-        "derived_sla_fields": [
-            "report_category",
-            "sla_status",
-            "hours_open",
-            "sla_calculated_at",
-        ],
+        "derived_sla_fields": DERIVED_SLA_FIELDS,
     }
 
 
@@ -164,12 +175,12 @@ def _resolve_statuses(payload: RawReportRequest) -> list[str] | None:
 
 
 def create_raw_report(payload: RawReportRequest, request: Request):
-    """Query Helix directly without applying daily-report business rules."""
+    """Query Helix directly without applying the report scope or storing anything."""
     extractor = HelixExtractor()
     if not extractor.is_configured():
         raise HTTPException(status_code=503, detail="Helix connection is not configured")
 
-    selected_fields = payload.fields or list(HELIX_FIELD_MAP.values())
+    selected_fields = payload.fields or list(RAW_REPORT_FIELDS)
     selected_groups = _resolve_assignee_groups(payload)
     selected_statuses = _resolve_statuses(payload)
     try:
@@ -178,12 +189,11 @@ def create_raw_report(payload: RawReportRequest, request: Request):
             end_date=payload.end,
             date_field=payload.date_field,
             fields=selected_fields,
-            assignee_groups=selected_groups,
+            support_groups=selected_groups,
             assignees=payload.assignees,
             statuses=selected_statuses,
             categories=payload.categories,
-            request_ids=payload.request_ids,
-            task_ids=payload.task_ids,
+            work_order_ids=payload.work_order_ids,
             calculate_sla=payload.calculate_sla,
             max_records=payload.limit,
         )
@@ -225,14 +235,11 @@ def create_raw_report(payload: RawReportRequest, request: Request):
     )
 
     return {
-        "source": "helix:TMS:Task",
+        "source": f"helix:{HELIX_FORM}",
         "start": payload.start,
         "end": payload.end,
         "date_field": payload.date_field,
-        "fields": selected_fields + (
-            ["report_category", "sla_status", "hours_open", "sla_calculated_at"]
-            if payload.calculate_sla else []
-        ),
+        "fields": selected_fields + (DERIVED_SLA_FIELDS if payload.calculate_sla else []),
         "divisions": payload.divisions or [],
         "assignee_groups": selected_groups,
         "assignees": payload.assignees or [],
@@ -240,8 +247,7 @@ def create_raw_report(payload: RawReportRequest, request: Request):
         "all_statuses": selected_statuses is None,
         "include_closed": payload.include_closed or selected_statuses is None,
         "categories": payload.categories or [],
-        "request_ids": payload.request_ids or [],
-        "task_ids": payload.task_ids or [],
+        "work_order_ids": payload.work_order_ids or [],
         "calculate_sla": payload.calculate_sla,
         "sla_calculated_at": (
             rows[0].get("sla_calculated_at") if payload.calculate_sla and rows else None

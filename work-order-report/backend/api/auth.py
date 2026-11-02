@@ -71,7 +71,11 @@ def utcnow() -> datetime:
 
 
 def configured_super_admin_email() -> str:
-    return os.getenv("SUPER_ADMIN_EMAIL", "siphamandla.mdletshe@vcontractor.co.za").strip().strip("'\"").lower()
+    """The Super Admin email; must be configured explicitly (no built-in default)."""
+    email = os.getenv("SUPER_ADMIN_EMAIL", "").strip().strip("'\"").lower()
+    if not email:
+        raise RuntimeError("SUPER_ADMIN_EMAIL must be set")
+    return email
 
 
 def allowed_email_domains() -> set[str]:

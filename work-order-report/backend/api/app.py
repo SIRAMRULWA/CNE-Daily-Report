@@ -7,10 +7,8 @@ Builds the app instance, registers routers, and configures CORS.
 Imported by api/main.py (the stable Uvicorn entrypoint).
 """
 
-import asyncio
 import logging
 import os
-from contextlib import suppress
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
@@ -29,30 +27,8 @@ from api.errors import (
 )
 from api.observability import RequestLoggingMiddleware
 from api.v1.router import router as v1_router
-from notifications.sender import run_due as run_due_reports
-from notifications.task_reminder_sender import run_due as run_due_reminders
 
 logger = logging.getLogger(__name__)
-
-
-async def _report_email_scheduler(interval_seconds: int) -> None:
-    """Check due email subscriptions without blocking the API event loop."""
-    while True:
-        try:
-            await asyncio.to_thread(run_due_reports)
-        except Exception:
-            logger.exception("Automatic report email scheduler check failed")
-        await asyncio.sleep(interval_seconds)
-
-
-async def _task_reminder_scheduler(interval_seconds: int) -> None:
-    """Run Admin-configured reminder schedules without blocking the API loop."""
-    while True:
-        try:
-            await asyncio.to_thread(run_due_reminders)
-        except Exception:
-            logger.exception("Automatic task reminder scheduler check failed")
-        await asyncio.sleep(interval_seconds)
 
 
 def _cors_origins() -> list[str]:
@@ -71,33 +47,28 @@ def _cors_origins() -> list[str]:
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(
-        title="ITIL Group Reports API",
+        title="Work Order Report API",
         description=(
-            "Serves the ITSS daily operations report data to Power BI "
-            "and dashboard clients. Built on top of the ITIL Group Reports "
-            "Automation pipeline."
+            "Serves the Helix Work Order report: daily snapshots, current open "
+            "Work Orders and target-date SLA status."
         ),
         version="1.0.0",
-        openapi_url="/api/openapi.json",
-        docs_url="/docs",
-        redoc_url="/redoc",
-        contact={"name": "ITIL Group Reports API Support"},
+        # Interactive API docs are not published in production.
+        openapi_url=None if settings.runtime.production else "/api/openapi.json",
+        docs_url=None if settings.runtime.production else "/docs",
+        redoc_url=None if settings.runtime.production else "/redoc",
+        contact={"name": "Work Order Report API Support"},
         license_info={"name": "Internal use only"},
         openapi_tags=[
             {"name": "Authentication", "description": "Session creation and revocation."},
             {"name": "Users", "description": "Current-user and user administration resources."},
             {"name": "Security", "description": "Login and session security administration."},
             {"name": "Divisions", "description": "Division and assignee-group configuration."},
-            {"name": "Daily Reports", "description": "Immutable selected-date report snapshots."},
-            {"name": "Operations", "description": "Current operational records and summaries."},
+            {"name": "Daily Reports", "description": "Immutable selected-date Work Order report snapshots."},
+            {"name": "Operations", "description": "Current open Work Orders and summaries."},
             {"name": "Audit", "description": "Security and operator audit events."},
-            {"name": "Report Subscriptions", "description": "Scheduled report delivery configuration."},
-            {"name": "Report Deliveries", "description": "Report delivery history and manual delivery creation."},
-            {"name": "Task Reminders", "description": "Real-time Helix reminder configuration and execution history."},
-            {"name": "Automation", "description": "Machine-to-machine automation platform triggers."},
             {"name": "Helix Reports", "description": "Direct, read-only Helix report generation."},
             {"name": "Pipeline", "description": "Pipeline execution history."},
-            {"name": "Maintenance", "description": "Restricted non-production maintenance jobs."},
             {"name": "Service", "description": "Service health and dependency status."},
         ],
     )
@@ -156,50 +127,6 @@ def create_app() -> FastAPI:
                 exc,
             )
 
-    @app.on_event("startup")
-    async def start_report_email_scheduler() -> None:
-        if not settings.schedulers.report_email_enabled:
-            logger.info("Automatic report email scheduler is disabled")
-            return
-        interval_seconds = settings.schedulers.report_email_interval_seconds
-        app.state.report_email_scheduler = asyncio.create_task(
-            _report_email_scheduler(interval_seconds),
-            name="report-email-scheduler",
-        )
-        logger.info("Automatic report email scheduler started; interval=%ss", interval_seconds)
-
-    @app.on_event("startup")
-    async def start_task_reminder_scheduler() -> None:
-        if not settings.schedulers.task_reminder_enabled:
-            logger.info("Automatic task reminder scheduler is disabled")
-            return
-        interval_seconds = settings.schedulers.task_reminder_interval_seconds
-        app.state.task_reminder_scheduler = asyncio.create_task(
-            _task_reminder_scheduler(interval_seconds), name="task-reminder-scheduler"
-        )
-        logger.info("Automatic task reminder scheduler started; interval=%ss", interval_seconds)
-
-    @app.on_event("shutdown")
-    async def stop_report_email_scheduler() -> None:
-        task = getattr(app.state, "report_email_scheduler", None)
-        if task is None:
-            return
-        task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
-        logger.info("Automatic report email scheduler stopped")
-
-    @app.on_event("shutdown")
-    async def stop_task_reminder_scheduler() -> None:
-        task = getattr(app.state, "task_reminder_scheduler", None)
-        if task is None:
-            return
-        task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
-        logger.info("Automatic task reminder scheduler stopped")
-
-    # The versioned router is the only public application API.
     app.include_router(v1_router, prefix="/api")
 
     return app

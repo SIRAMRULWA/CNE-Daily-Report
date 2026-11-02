@@ -8,7 +8,7 @@ param(
     [switch]$UseTty,
     [switch]$SkipDbInit,
     [int]$ApiPort = 8000,
-    [string]$ContainerName = "itil-backend-api",
+    [string]$ContainerName = "wo-backend-api",
     [string]$ReleaseTag = (Get-Date -Format "yyyyMMdd-HHmmss")
 )
 
@@ -30,7 +30,7 @@ else {
     $ServerIP = $EnvironmentIPs[$Environment]
 }
 
-$RemoteBasePath = "/opt/itil-report-stack"
+$RemoteBasePath = "/opt/wo-report-stack"
 $RemoteRelease = "$RemoteBasePath/releases/$ReleaseTag"
 $TarName = "itil-backend-src-$ReleaseTag.tar.gz"
 $RemoteScriptPath = "$RemoteBasePath/scripts/deploy-backend.sh"

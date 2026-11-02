@@ -15,15 +15,15 @@ from pipeline.activity_log import list_activity
 def workspace_records(
     division: Optional[str] = Query(default=None),
     assignee_group: Optional[str] = Query(default=None),
-    sla: Optional[str] = Query(default=None, description="NEARING_SLA|BREACHED|WITHIN_SLA|NO_SCHEDULE|NO_ASSIGN_TIME"),
-    category: Optional[str] = Query(default=None, description="INCIDENT|CHANGE|ACCESS|EVENT"),
+    sla: Optional[str] = Query(default=None, description="WITHIN_SLA|NEARING_SLA|BREACHED|NO_TARGET_DATE"),
+    category: Optional[str] = Query(default=None, description="Work Order type"),
     priority: Optional[str] = Query(default=None),
     search: Optional[str] = Query(default=None),
     include_excluded: bool = Query(default=False),
     limit: int = Query(default=250, le=5000),
     offset: int = Query(default=0, ge=0),
 ):
-    """Detailed, filterable records for the web UI."""
+    """Current open Work Orders, filterable, for the web UI."""
     return list_records(
         division=division,
         assignee_group=assignee_group,
@@ -43,7 +43,7 @@ def workspace_summary(
     assignee_group: Optional[str] = Query(default=None),
     include_excluded: bool = Query(default=False),
 ):
-    """Counts by division, assignee group, SLA status, and category."""
+    """Counts by division, support group, SLA status, and Work Order type."""
     return summarize_records(
         division=division,
         assignee_group=assignee_group,

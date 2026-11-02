@@ -1,41 +1,58 @@
-"""Database-free tests for the Daily Report capability boundary."""
+"""Database-free tests for the Work Order report capability boundary."""
 
 import unittest
 from datetime import date
-from io import BytesIO
 from unittest.mock import patch
 
-from openpyxl import load_workbook
 from capabilities.daily_reports import repository
 from capabilities.daily_reports.service import DailyReportService
-from notifications.reports import RECORD_COLUMNS, attachment
 
 
-class DailyReportCapabilityTests(unittest.TestCase):
-    def test_day_window_uses_selected_date_without_historical_fallback(self):
-        selected, start, end = repository._date_window(
-            date(2026, 7, 13), "day"
-        )
-        self.assertEqual(date(2026, 7, 13), selected)
-        self.assertEqual(selected, start)
-        self.assertEqual(selected, end)
+class WorkOrderReportCapabilityTests(unittest.TestCase):
+    def test_day_window_uses_selected_date(self):
+        selected, start, end = repository._date_window(date(2026, 7, 13), "day")
+        self.assertEqual((date(2026, 7, 13),) * 3, (selected, start, end))
 
     def test_week_window_is_monday_through_sunday(self):
-        selected, start, end = repository._date_window(
-            date(2026, 7, 15), "week"
-        )
+        selected, start, end = repository._date_window(date(2026, 7, 15), "week")
         self.assertEqual(date(2026, 7, 13), start)
         self.assertEqual(date(2026, 7, 19), end)
         self.assertEqual(date(2026, 7, 15), selected)
 
+    def test_assignee_group_filter_targets_support_group(self):
+        where, params = repository._scope_filters(
+            date(2026, 7, 13), date(2026, 7, 13), "INTSS", "Team A"
+        )
+        self.assertIn("division = %s", where)
+        self.assertIn("support_group = %s", where)
+        self.assertEqual([date(2026, 7, 13), date(2026, 7, 13), "INTSS", "Team A"], params)
+
+    @patch("capabilities.daily_reports.repository.run_query", return_value=[])
+    def test_open_sla_filter_reads_only_open_snapshot(self, run_query):
+        repository._report_records(date(2026, 7, 13), date(2026, 7, 13), sla="BREACHED")
+        sql = run_query.call_args.args[0]
+        self.assertEqual(1, run_query.call_count)
+        self.assertIn("reporting.wo_report_records", sql)
+
+    @patch("capabilities.daily_reports.repository.run_query", return_value=[])
+    def test_completed_sla_filter_reads_only_completed_snapshot(self, run_query):
+        repository._report_records(date(2026, 7, 13), date(2026, 7, 13), sla="MISSED_TARGET")
+        self.assertEqual(1, run_query.call_count)
+        self.assertIn("reporting.wo_completed", run_query.call_args.args[0])
+
+    @patch("capabilities.daily_reports.repository.run_query", return_value=[])
+    def test_no_sla_filter_reads_open_and_completed(self, run_query):
+        result = repository._report_records(date(2026, 7, 13), date(2026, 7, 13))
+        tables = " ".join(call.args[0] for call in run_query.call_args_list)
+        self.assertIn("reporting.wo_report_records", tables)
+        self.assertIn("reporting.wo_completed", tables)
+        self.assertEqual(0, result["count"])
+
     @patch("capabilities.daily_reports.service.repository.daily_report_view")
     def test_service_delegates_complete_view_contract(self, report_view):
         report_view.return_value = {"data_available": False, "summary": {"rows": []}}
-        service = DailyReportService()
-        result = service.report_view(
-            report_date=date(2026, 7, 13),
-            division="INTSS",
-            include_records=True,
+        result = DailyReportService().report_view(
+            report_date=date(2026, 7, 13), division="INTSS", include_records=True,
         )
         self.assertFalse(result["data_available"])
         report_view.assert_called_once_with(
@@ -49,38 +66,6 @@ class DailyReportCapabilityTests(unittest.TestCase):
             sla=None,
             category=None,
         )
-
-    @patch("capabilities.daily_reports.service.repository.email_report_data")
-    def test_email_and_api_use_the_same_snapshot_capability(self, email_data):
-        email_data.return_value = ([{"sla_band": "Total Open Calls"}], [{"request_id": "INC1"}])
-        summary, records = DailyReportService().email_data(
-            date(2026, 7, 13), "INTSS", None
-        )
-        self.assertEqual("Total Open Calls", summary[0]["sla_band"])
-        self.assertEqual("INC1", records[0]["request_id"])
-
-    def test_email_record_columns_match_attachment_contract(self):
-        self.assertEqual(RECORD_COLUMNS, repository.EMAIL_RECORD_COLUMNS)
-
-    def test_xlsx_adds_all_closed_changes_without_altering_group_sheet(self):
-        open_record = {"request_id": "INC1", "assignee_group": "Team A"}
-        closed = {
-            "request_id": "CRQ1", "task_id": "TAS1",
-            "assignee_group": "Team A", "report_category": "CHANGE",
-            "status": "Cancelled", "status_reason": "Unsuccessful",
-        }
-        file = attachment(
-            [open_record], "INTSS", date(2026, 7, 31), "XLSX", [closed]
-        )
-        workbook = load_workbook(BytesIO(file.content))
-        self.assertEqual(["Team A", "Closed Changes"], workbook.sheetnames)
-        self.assertEqual("INC1", workbook["Team A"].cell(2, 2).value)
-        closed_sheet = workbook["Closed Changes"]
-        headers = [cell.value for cell in closed_sheet[1]]
-        self.assertNotIn("SLA", headers)
-        self.assertEqual("CHANGE", closed_sheet.cell(2, headers.index("Category") + 1).value)
-        self.assertEqual("Status Reason", headers[-2])
-        self.assertEqual("Unsuccessful", closed_sheet.cell(2, len(headers) - 1).value)
 
 
 if __name__ == "__main__":

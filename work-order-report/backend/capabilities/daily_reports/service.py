@@ -1,4 +1,4 @@
-"""Application boundary for immutable Daily Report snapshots."""
+"""Application boundary for immutable Work Order report snapshots."""
 
 from datetime import date
 from typing import Literal
@@ -51,13 +51,6 @@ class DailyReportService:
             category=category,
         )
 
-    def email_data(
-        self, report_date: date, division: str, assignee_group: str | None
-    ) -> tuple[list[dict], list[dict]]:
-        return repository.email_report_data(
-            report_date, division, assignee_group
-        )
-
 
 _service = DailyReportService()
 
@@ -68,9 +61,3 @@ def daily_report_view(**kwargs) -> dict:
 
 def daily_report_records(**kwargs) -> dict:
     return _service.report_records(**kwargs)
-
-
-def email_report_data(
-    report_date: date, division: str, assignee_group: str | None
-) -> tuple[list[dict], list[dict]]:
-    return _service.email_data(report_date, division, assignee_group)

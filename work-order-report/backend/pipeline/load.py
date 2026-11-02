@@ -6,7 +6,7 @@ Database loader. Manages ELT run lifecycle and bulk upsert.
 Responsibilities:
   - Open / close run records in staging.elt_run_log.
   - Validate required fields; write rejected records to staging.elt_rejected_records.
-  - Bulk upsert ChangeRecord batches into staging.raw_changes.
+  - Bulk upsert WorkOrderRecord batches into staging.raw_work_orders.
   - Update reporting.pipeline_heartbeat after successful runs.
   - Provide watermark helpers for future incremental Helix API ingestion.
 """
@@ -20,7 +20,7 @@ from typing import List, Optional
 import psycopg2.extras
 
 from pipeline.db import get_cursor
-from pipeline.models import ChangeRecord
+from pipeline.models import WorkOrderRecord
 
 logger = logging.getLogger(__name__)
 
@@ -95,118 +95,92 @@ def _write_rejected(run_id: int, source_entity: str, raw: dict, reason: str) -> 
         VALUES (%s, %s, %s, %s, NOW())
     """
     with get_cursor() as cur:
-        cur.execute(sql, (run_id, source_entity, json.dumps(raw), reason))
+        cur.execute(sql, (run_id, source_entity, json.dumps(raw, default=str), reason))
 
 
 # ---------------------------------------------------------------------------
-# Change record upsert
+# Work Order upsert
 # ---------------------------------------------------------------------------
 
-def load_changes(
-    records: List[ChangeRecord],
+WORK_ORDER_COLUMNS = (
+    "run_id", "work_order_id", "summary", "work_order_type", "category_tier1",
+    "status", "status_reason", "priority", "requester", "support_group",
+    "assignee", "notes", "submit_date", "target_date", "completed_date",
+    "last_modified", "division", "report_category", "sla_status", "hours_open",
+    "days_to_target", "is_open", "is_excluded", "source", "raw_payload",
+)
+
+
+def _work_order_row(rec: WorkOrderRecord, run_id: int, source: Optional[str]) -> tuple:
+    return (
+        run_id,
+        rec.work_order_id,
+        rec.summary,
+        rec.work_order_type,
+        rec.category_tier1,
+        rec.status,
+        rec.status_reason,
+        rec.priority,
+        rec.requester,
+        rec.support_group,
+        rec.assignee,
+        rec.notes,
+        rec.submit_date,
+        rec.target_date,
+        rec.completed_date,
+        rec.last_modified,
+        rec.division,
+        rec.report_category,
+        rec.sla_status,
+        rec.hours_open,
+        rec.days_to_target,
+        rec.is_open,
+        rec.is_excluded,
+        source or rec.source,
+        json.dumps(rec.raw_payload, default=str) if rec.raw_payload else None,
+    )
+
+
+UPSERT_SQL = f"""
+    INSERT INTO staging.raw_work_orders ({", ".join(WORK_ORDER_COLUMNS)}, loaded_at)
+    VALUES ({", ".join(["%s"] * len(WORK_ORDER_COLUMNS))}, NOW())
+    ON CONFLICT (work_order_id) DO UPDATE SET
+        {", ".join(f"{column} = EXCLUDED.{column}" for column in WORK_ORDER_COLUMNS if column != "work_order_id")},
+        loaded_at = NOW()
+"""
+
+
+def load_work_orders(
+    records: List[WorkOrderRecord],
     run_id:  int,
     source:  Optional[str] = None,
 ) -> tuple[int, int]:
     """
-    Bulk upsert a batch of ChangeRecord objects into staging.raw_changes.
+    Bulk upsert a batch of WorkOrderRecord objects into staging.raw_work_orders.
 
-    Conflict key: (request_id, task_id).
-    On conflict: update all mutable fields.
-
+    Conflict key: work_order_id. On conflict every mutable field is updated.
     Returns (rows_loaded, rows_rejected).
     """
     if not records:
         return 0, 0
 
-    rows_loaded   = 0
     rows_rejected = 0
-    batch_rows    = []
-
+    batch_rows = []
     for rec in records:
-        # Validation — only request_id is hard-required
-        if not rec.request_id:
-            _write_rejected(run_id, "changes", rec.raw_payload or {}, "missing request_id")
+        if not rec.work_order_id:
+            _write_rejected(run_id, "work_orders", rec.raw_payload or {}, "missing work_order_id")
             rows_rejected += 1
             continue
-
-        batch_rows.append((
-            run_id,
-            rec.request_id,
-            rec.task_id or "",
-            rec.op_cat_tier1,
-            rec.summary,
-            rec.assignee,
-            rec.priority,
-            rec.status,
-            rec.status_reason,
-            rec.assignee_group,
-            rec.notes,
-            rec.create_date,
-            rec.assign_time,
-            rec.closed_time,
-            rec.scheduled_start,
-            rec.scheduled_end,
-            rec.report_group,
-            rec.report_category,
-            rec.sla_status,
-            rec.hours_open,
-            rec.exclude_change,
-            rec.exclude_incident,
-            source or rec.source,
-            json.dumps(rec.raw_payload) if rec.raw_payload else None,
-        ))
+        batch_rows.append(_work_order_row(rec, run_id, source))
 
     if not batch_rows:
         return 0, rows_rejected
 
-    upsert_sql = """
-        INSERT INTO staging.raw_changes (
-            run_id, request_id, task_id, op_cat_tier1, summary,
-            assignee, priority, status, status_reason, assignee_group, notes,
-            create_date, assign_time, closed_time, scheduled_start, scheduled_end,
-            report_group, report_category, sla_status, hours_open,
-            exclude_change, exclude_incident,
-            source, raw_payload, loaded_at
-        ) VALUES (
-            %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s,
-            %s, %s, %s, %s,
-            %s, %s,
-            %s, %s, NOW()
-        )
-        ON CONFLICT (request_id, task_id) DO UPDATE SET
-            run_id          = EXCLUDED.run_id,
-            op_cat_tier1    = EXCLUDED.op_cat_tier1,
-            summary         = EXCLUDED.summary,
-            assignee        = EXCLUDED.assignee,
-            priority        = EXCLUDED.priority,
-            status          = EXCLUDED.status,
-            status_reason   = EXCLUDED.status_reason,
-            assignee_group  = EXCLUDED.assignee_group,
-            notes           = EXCLUDED.notes,
-            create_date     = EXCLUDED.create_date,
-            assign_time     = EXCLUDED.assign_time,
-            closed_time     = EXCLUDED.closed_time,
-            scheduled_start = EXCLUDED.scheduled_start,
-            scheduled_end   = EXCLUDED.scheduled_end,
-            report_group    = EXCLUDED.report_group,
-            report_category = EXCLUDED.report_category,
-            sla_status      = EXCLUDED.sla_status,
-            hours_open      = EXCLUDED.hours_open,
-            exclude_change  = EXCLUDED.exclude_change,
-            exclude_incident = EXCLUDED.exclude_incident,
-            source          = EXCLUDED.source,
-            raw_payload     = EXCLUDED.raw_payload,
-            loaded_at       = NOW()
-    """
-
     with get_cursor() as cur:
-        psycopg2.extras.execute_batch(cur, upsert_sql, batch_rows, page_size=PAGE_SIZE)
-        rows_loaded = len(batch_rows)
+        psycopg2.extras.execute_batch(cur, UPSERT_SQL, batch_rows, page_size=PAGE_SIZE)
 
-    logger.info("Upserted %d records (run_id=%d source=%s)", rows_loaded, run_id, source or "record")
-    return rows_loaded, rows_rejected
+    logger.info("Upserted %d Work Orders (run_id=%d source=%s)", len(batch_rows), run_id, source or "record")
+    return len(batch_rows), rows_rejected
 
 
 # ---------------------------------------------------------------------------

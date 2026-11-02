@@ -30,29 +30,18 @@ class PurgeTarget:
 
 # This is intentionally an allowlist.  Never add audit/configuration tables
 # here merely because they contain a timestamp.
+SNAPSHOT_PREDICATE = "report_date < ((CURRENT_TIMESTAMP AT TIME ZONE %s)::date - (%s - 1))"
+
 PURGE_TARGETS = (
-    PurgeTarget(
-        "reporting.daily_report_records",
-        "report_date < ((CURRENT_TIMESTAMP AT TIME ZONE %s)::date - (%s - 1))",
-    ),
-    PurgeTarget(
-        "reporting.daily_report_success_closures",
-        "report_date < ((CURRENT_TIMESTAMP AT TIME ZONE %s)::date - (%s - 1))",
-    ),
-    PurgeTarget(
-        "reporting.daily_report_closed_changes",
-        "report_date < ((CURRENT_TIMESTAMP AT TIME ZONE %s)::date - (%s - 1))",
-    ),
-    PurgeTarget(
-        "reporting.daily_report_summary",
-        "report_date < ((CURRENT_TIMESTAMP AT TIME ZONE %s)::date - (%s - 1))",
-    ),
+    PurgeTarget("reporting.wo_report_records", SNAPSHOT_PREDICATE),
+    PurgeTarget("reporting.wo_report_summary", SNAPSHOT_PREDICATE),
+    PurgeTarget("reporting.wo_completed", SNAPSHOT_PREDICATE),
     PurgeTarget(
         "staging.elt_rejected_records",
         "rejected_at < CURRENT_TIMESTAMP - (%s * INTERVAL '1 day')",
     ),
     PurgeTarget(
-        "staging.raw_changes",
+        "staging.raw_work_orders",
         "loaded_at < CURRENT_TIMESTAMP - (%s * INTERVAL '1 day')",
     ),
 )

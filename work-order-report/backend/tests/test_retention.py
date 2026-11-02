@@ -11,12 +11,11 @@ class RetentionTests(unittest.TestCase):
         tables = {target.table for target in PURGE_TARGETS}
         self.assertEqual(
             {
-                "staging.raw_changes",
+                "staging.raw_work_orders",
                 "staging.elt_rejected_records",
-                "reporting.daily_report_records",
-                "reporting.daily_report_success_closures",
-                "reporting.daily_report_closed_changes",
-                "reporting.daily_report_summary",
+                "reporting.wo_report_records",
+                "reporting.wo_report_summary",
+                "reporting.wo_completed",
             },
             tables,
         )
@@ -36,7 +35,7 @@ class RetentionTests(unittest.TestCase):
         self.assertEqual(set(deleted), {target.table for target in PURGE_TARGETS})
         self.assertTrue(all(count == 3 for count in deleted.values()))
         sql = "\n".join(call.args[0] for call in cursor.execute.call_args_list)
-        self.assertIn("DELETE FROM staging.raw_changes", sql)
+        self.assertIn("DELETE FROM staging.raw_work_orders", sql)
         self.assertIn("enforce_data_retention", sql)
 
     def test_zero_day_retention_is_rejected(self):
