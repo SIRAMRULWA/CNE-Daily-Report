@@ -1,0 +1,65 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: itil-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-itil_reports}
+      POSTGRES_USER: ${POSTGRES_USER:-itil_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    ports:
+      - "5433:5432"  # Exposes Postgres to the host for external Grafana/Power BI
+    volumes:
+      - /opt/itil-report-stack/shared/pgdata:/var/lib/postgresql/data:Z
+    networks:
+      - itil-shared-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging:
+      driver: k8s-file
+      options:
+        max-size: "${LOG_MAX_SIZE:-20m}"
+        max-file: "${LOG_MAX_FILES:-5}"
+
+  app:
+    build: .
+    image: ${APP_IMAGE:-itil-group-reports:latest}
+    container_name: itil-backend-api
+    restart: unless-stopped
+    env_file:
+      - /opt/itil-report-stack/shared/.env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-itil_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-itil_reports}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-itil_reports}
+      DB_USER: ${POSTGRES_USER:-itil_user}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      REQUIRE_DB_ON_STARTUP: ${REQUIRE_DB_ON_STARTUP:-true}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - /opt/itil-report-stack/shared/data:/app/data:Z
+      - /opt/itil-report-stack/shared/output:/app/output:Z
+      - /opt/itil-report-stack/shared/logs/dbt:/app/dbt/logs:Z
+      - /opt/itil-report-stack/shared/dbt/target:/app/dbt/target:Z
+    networks:
+      - itil-shared-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging:
+      driver: k8s-file
+      options:
+        max-size: "${LOG_MAX_SIZE:-20m}"
+        max-file: "${LOG_MAX_FILES:-5}"
+
+networks:
+  itil-shared-net:
+    external: true

@@ -1,0 +1,141 @@
+version: 2
+
+models:
+  - name: stg_changes
+    description: >
+      Deduplicated and normalised view over staging.raw_changes.
+      One row per (request_id, task_id). Source for all downstream marts.
+    columns:
+      - name: request_id
+        description: Helix RootRequestID (CRQ.../INC...)
+        tests:
+          - not_null
+      - name: task_id
+        description: Helix TaskID (TAS...)
+        tests:
+          - not_null
+      - name: report_category
+        description: Derived report column — INCIDENT / CHANGE / ACCESS / EVENT
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['INCIDENT', 'CHANGE', 'ACCESS', 'EVENT']
+              config:
+                severity: warn
+      - name: sla_status
+        description: SLA band - WITHIN_SLA / NEARING_SLA / BREACHED / NO_SCHEDULE / NO_ASSIGN_TIME / CLOSED / OUT_OF_SCOPE
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['WITHIN_SLA', 'NEARING_SLA', 'BREACHED', 'NO_SCHEDULE', 'NO_ASSIGN_TIME', 'CLOSED', 'OUT_OF_SCOPE']
+              config:
+                severity: warn
+
+  - name: daily_report_summary
+    description: >
+      Pre-aggregated daily operations report matrix for every configured division
+      and assignee group with eligible active records.
+      Grain: one row per (report_date, report_group, assignee_group, sla_band).
+      The model is incremental so previous report_date snapshots are preserved
+      for historical day/week reporting, while each snapshot only consumes
+      records loaded on that same WORKSPACE_TIMEZONE date.
+      Powers the /api/v1/daily-reports endpoint and Power BI direct queries.
+    columns:
+      - name: report_date
+        tests:
+          - not_null
+      - name: report_group
+        tests:
+          - not_null
+      - name: assignee_group
+        tests:
+          - not_null
+      - name: sla_band
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['Total Open Calls', 'Calls Nearing SLA', 'Breached Calls']
+      - name: total_count
+        tests:
+          - not_null
+
+  - name: daily_report_records
+    description: >
+      Record-level daily operations report snapshot for every eligible active
+      record. Grain: one row per (report_date, request_id, task_id).
+      This model lets report_date drive drill-through records, groups, KPIs,
+      and matrix rows from the same historical date window without mixing
+      records loaded on different dates.
+    columns:
+      - name: report_date
+        tests:
+          - not_null
+      - name: request_id
+        tests:
+          - not_null
+      - name: task_id
+        tests:
+          - not_null
+      - name: report_group
+        tests:
+          - not_null
+      - name: assignee_group
+        tests:
+          - not_null
+      - name: report_category
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['INCIDENT', 'CHANGE', 'ACCESS', 'EVENT']
+      - name: sla_status
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['WITHIN_SLA', 'NEARING_SLA', 'BREACHED', 'NO_SCHEDULE', 'NO_ASSIGN_TIME']
+
+  - name: daily_report_success_closures
+    description: >
+      Per-group count of records whose Actual End Date was the prior local day
+      and whose Status Reason was Success. Captured by the next morning run and
+      kept separate from active SLA counts.
+    columns:
+      - name: report_date
+        tests:
+          - not_null
+      - name: closure_date
+        tests:
+          - not_null
+      - name: window_start
+        tests:
+          - not_null
+      - name: window_end
+        tests:
+          - not_null
+      - name: report_group
+        tests:
+          - not_null
+      - name: assignee_group
+        tests:
+          - not_null
+      - name: total_count
+        tests:
+          - not_null
+
+  - name: daily_report_closed_changes
+    description: >
+      Attachment-only record snapshot of changes closed in the prior scheduled
+      24-hour window, including every status reason and outcome.
+    columns:
+      - name: report_date
+        tests:
+          - not_null
+      - name: request_id
+        tests:
+          - not_null
+      - name: task_id
+        tests:
+          - not_null
+      - name: report_group
+        tests:
+          - not_null

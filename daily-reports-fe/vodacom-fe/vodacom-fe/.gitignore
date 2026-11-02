@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Next.js build output
+.next/
+out/
+
+# Local environments and caches
+venv/
+*.tsbuildinfo
+*.log
+.eslintcache
+
+# Local environment files (examples remain tracked)
+.env
+.env.local
+.env.*.local
+.env.qa
+.env.production
+
+# Deployment bundles and temporary installer output
+deploy_bundle/
+itil-frontend-*.tar.gz
+remote_install_tmp.sh
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

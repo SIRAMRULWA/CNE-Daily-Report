@@ -1,0 +1,33 @@
+name: 'itil_group_reports'
+version: '1.0.0'
+config-version: 2
+
+profile: 'itil_group_reports'
+
+model-paths: ["models"]
+# seed-paths:  ["seeds"]
+test-paths:  ["tests"]
+macro-paths: ["macros"]
+log-path:    "logs"
+target-path: "target"
+
+models:
+  itil_group_reports:
+    staging:
+      +materialized: view
+      +schema: staging
+    marts:
+      +materialized: table
+      +schema: reporting
+
+# seeds:
+#   itil_group_reports:
+#     +schema: staging
+
+vars:
+  nearing_sla_hours_medium: 4
+  nearing_sla_hours_high: 2
+  nearing_sla_hours_low: 8
+  change_future_days: 1
+  change_stale_days: 90
+  incident_stale_days: 30

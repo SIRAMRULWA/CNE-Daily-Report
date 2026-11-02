@@ -1,0 +1,41 @@
+# Environment
+.env
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# dbt
+dbt/target/
+dbt/logs/
+dbt/.user.yml
+
+# Data / outputs
+data/excel_drop/*.xlsx
+data/excel_drop/*.xls
+data/excel_drop/*.csv
+!data/excel_drop/.gitkeep
+data/excel_drop/archived/
+output/
+
+# SSL cert
+global-bundle.pem
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
