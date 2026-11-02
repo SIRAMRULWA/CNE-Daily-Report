@@ -1,0 +1,16 @@
+# Run on the Linux host with: crontab deploy/crontab.example
+# Adjust the container CLI if the target uses Docker instead of Podman.
+
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Refresh the Daily Report at 07:00 every day, including weekends. This keeps
+# successful-closure reporting in exact daily 07:00-to-07:00 windows.
+0 7 * * * cd /opt/itil-report-stack/current && /usr/bin/podman exec itil-backend-api bash /app/deploy/run-pipeline.sh >> /opt/itil-report-stack/shared/logs/pipeline-cron.log 2>&1
+
+# Enforce the seven-calendar-day business-data window independently of the
+# pipeline outcome. Audit, security, configuration, and run logs are preserved.
+0 8 * * * cd /opt/itil-report-stack/current && /usr/bin/podman exec itil-backend-api bash /app/deploy/run-retention.sh >> /opt/itil-report-stack/shared/logs/retention-cron.log 2>&1
+
+# Report-email and task-reminder due checks run inside the API process. Do not
+# add separate sender cron jobs while those internal schedulers are enabled.
